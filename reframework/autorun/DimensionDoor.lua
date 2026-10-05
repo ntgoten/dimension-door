@@ -1,4 +1,4 @@
--- Dimension Door (D&D style) - Dragon's Dogma 2 (REFramework script) v0.8.3
+-- Dimension Door (D&D style) - Dragon's Dogma 2 (REFramework script) v0.8.4
 -- Press B (keyboard) or hold Vocation Action + give Go! (gamepad default: R1 + d-pad up): your character starts
 -- casting (Mage casting animation) and a beam goes from your eyes to where the camera aims, up to 500 ft; it
 -- stops at the first thing it hits (or ends in the air). Sparks mark the spot. Press again: the spot is locked and a door of frost shimmer opens next
@@ -10,7 +10,7 @@
 -- Needs _ScriptCore (autorun/_SharedCore) for the ground checks.
 -- REFramework menu (Insert) > Script Generated UI > Dimension Door. Uninstall: delete this file.
 
-local VERSION = "0.8.3"
+local VERSION = "0.8.4"
 local CONFIG_FILE = "DimensionDoor.json"
 local LOG_FILE = "DimensionDoor_debug.json"
 local FT = 0.3048
@@ -55,7 +55,10 @@ local function copy(v)
     return t
 end
 local config = json.load_file(CONFIG_FILE) or {}
-for k, v in pairs(DEFAULTS) do if config[k] == nil then config[k] = copy(v) end end
+local USER_SETTINGS = { key = true, max_ft = true, door_time = true, door_style = true }   -- the menu's settings
+for k, v in pairs(DEFAULTS) do
+    if config[k] == nil or not USER_SETTINGS[k] then config[k] = copy(v) end    -- the rest: always the defaults
+end
 for k in pairs(config) do if DEFAULTS[k] == nil then config[k] = nil end end -- drop settings of test versions
 local function save_config() json.dump_file(CONFIG_FILE, config) end
 
@@ -1155,7 +1158,6 @@ local waitingKey = false
 re.on_draw_ui(function()
     if not imgui.tree_node("Dimension Door v" .. VERSION) then return end
     local changed, c = false, false
-    c, config.enabled = imgui.checkbox("Enabled", config.enabled); changed = changed or c
     if waitingKey then
         imgui.text("Press a letter or F-key...")
         for code, _ in pairs(KEY_NAMES) do
@@ -1164,40 +1166,14 @@ re.on_draw_ui(function()
     elseif imgui.button("Key: " .. (KEY_NAMES[config.key] or tostring(config.key)) .. " (click to change)") then
         waitingKey = true
     end
-    c, config.pad_combo = imgui.checkbox("Hold Vocation Action + Go! (default R1 + d-pad up)", config.pad_combo); changed = changed or c
-    if config.pad_combo then
-        imgui.text("  Vocation Action: " .. (vocationHeld and "HELD (pawn commands blocked)" or "not held"))
-    end
     c, config.max_ft = imgui.slider_int("Max range (ft)", config.max_ft, 30, 1000); changed = changed or c
     c, config.door_time = imgui.slider_int("Door stays open (s)", config.door_time, 5, 300); changed = changed or c
-    c, config.door_offset = imgui.slider_float("Door height offset (m)", config.door_offset, -2.0, 2.0, "%.1f"); changed = changed or c
     c, config.door_style = imgui.combo("Door look", config.door_style, { "Shimmer frame + wisps + glow", "Classic (shimmer frame only)" }); changed = changed or c
-    if config.door_style == 1 then
-    c, config.fill_wisps = imgui.slider_int("Wisps inside the door", config.fill_wisps, 0, 12); changed = changed or c
-    c, config.wisp_w = imgui.slider_float("Wisps width", config.wisp_w, 0.2, 4.0, "%.2f"); changed = changed or c
-    c, config.wisp_h = imgui.slider_float("Wisps height", config.wisp_h, 0.2, 4.0, "%.2f"); changed = changed or c
-    c, config.glow_fill = imgui.checkbox("Glow inside the door", config.glow_fill); changed = changed or c
-    end
-    if config.glow_fill and config.door_style == 1 then
-        c, config.glow_scale = imgui.slider_float("Glow size", config.glow_scale, 0.2, 3.0, "%.2f"); changed = changed or c
-        c, config.glow_y = imgui.slider_float("Glow height in the door", config.glow_y, 0.0, 1.0, "%.2f"); changed = changed or c
-    end
-    c, config.cast_anim = imgui.checkbox("Casting animation while aiming", config.cast_anim); changed = changed or c
-    c, config.cutscene = imgui.checkbox("Arrival scene (camera flies, you walk out)", config.cutscene); changed = changed or c
-    if config.cutscene then
-        c, config.fly_time = imgui.slider_float("Camera flight (s)", config.fly_time, 0.3, 5.0, "%.1f"); changed = changed or c
-    end
-    c, config.sounds = imgui.checkbox("Sounds", config.sounds); changed = changed or c
-    if imgui.button("Default") then
-        for k, v in pairs(DEFAULTS) do config[k] = copy(v) end
-        changed = true
-    end
     local st = "ready"
     if state == "aiming" then st = s.b and string.format("aiming, %.0f ft%s", s.b.dist / FT, s.b.hit and "" or " (open air)") or "aiming"
     elseif state == "door" then st = string.format("door open, %.0f ft, %ds left", s.dist / FT, math.floor(s.untilT - os.clock())) end
     if scene then st = "arriving" end
     imgui.text("Now: " .. st .. (cast_ray and "" or "   - _ScriptCore (_SharedCore) MISSING, the spell can't work"))
-    imgui.text("Last: " .. lastMsg)
     if changed then save_config() end
     imgui.tree_pop()
 end)

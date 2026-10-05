@@ -23,7 +23,7 @@ Everything you see is the game's own: Mystic Spearhand's Skydragon's Fangtooth s
 Boon shimmer and wisps, a cutscene light glow, the ferrystone warp sound and the Mage's casting animation. No frost
 weapon is needed (the wisps come from a hidden Stalwart Sword the mod spawns from the game's weapon catalog). No game files are included or replaced.
 
-Current version: **0.8.3**. Download it from [Releases](../../releases).
+Current version: **0.8.4**. Download it from [Releases](../../releases).
 
 ## Requirements
 
@@ -42,14 +42,11 @@ Current version: **0.8.3**. Download it from [Releases](../../releases).
 
 ## Settings
 
-Press **Insert** → *Script Generated UI* → **Dimension Door v0.8.3**:
+Press **Insert** → *Script Generated UI* → **Dimension Door v0.8.4**:
 
-- **Enabled**, **Key** (click to change), **Hold Vocation Action + Go!** (shows whether the button is seen as held)
-- **Max range (ft)**, **Door stays open (s)**, **Door height offset (m)**
-- **Door look** (shimmer frame + wisps + glow, or classic), **Wisps inside the door**, **Wisps width/height**,
-  **Glow inside the door**, **Glow size**, **Glow height in the door**
-- **Casting animation while aiming**, **Arrival scene** (off = instant teleport), **Camera flight (s)**
-- **Sounds**, **Default**
+- **Key** (click to change; letters and F-keys)
+- **Max range (ft)**, **Door stays open (s)**
+- **Door look**: shimmer frame + wisps + glow, or classic (shimmer frame only)
 
 Settings are saved to `reframework/data/DimensionDoor.json`.
 

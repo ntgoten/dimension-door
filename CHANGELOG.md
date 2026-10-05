@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.4
+- Simpler settings menu: only the key, max range, how long the door stays open, and the door look. Everything
+  else uses the tuned defaults.
+
 ## 0.8.3
 - New default door look: the frost-shimmer frame now has frost wisps and a soft light inside. Works with any
   weapon or none (the wisps come from a hidden Stalwart Sword the mod spawns from the game's weapon catalog).
