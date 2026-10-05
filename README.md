@@ -4,24 +4,25 @@ A Dragon's Dogma 2 mod (REFramework Lua script) that adds a **Dimension Door** s
 D&D one: aim at a spot up to 500 ft away, open a door of light next to you, walk through it and step out
 at the destination.
 
-- **Cast:** press **B** (keyboard), or **hold L1 + d-pad up** (gamepad). Your character goes into the Mage's
+- **Cast:** press **B** (keyboard), or **hold your Vocation Action button and give Go!** (gamepad; with the default
+  controls that's **R1 + d-pad up**). The mod follows the game's own button mapping. Your character goes into the Mage's
   spell-casting animation and turns to where you aim. A beam goes from your eyes to where the camera
   points and stops at the first thing it hits (ground, a wall, a roof); sparks mark the spot. If it hits
   nothing it ends in the air 500 ft away.
-- **Open the door:** press again. The target is locked and a door of frost shimmer opens right next to you,
+- **Open the door:** press again (on gamepad, d-pad up alone works while aiming). The target is locked and a door of frost shimmer opens right next to you,
   toward the camera, even in the air at a roof edge. A matching door appears at the destination too (just
   for show).
 - **Walk through it:** the camera flies to the destination, a door opens there, your character steps out of
   it toward the camera, and the camera swings back behind you. Press once more to close an open door; it also
   closes by itself after a minute.
-- **Gamepad:** while L1 is held, the d-pad doesn't give pawn commands (like R1 + d-pad switching the d-pad to
-  items). The mod learns which signal each d-pad command sends the first time you give it normally (without L1).
+- **Gamepad:** while the Vocation Action button is held, the d-pad doesn't give pawn commands (like holding the
+  weapon-skill button switches the d-pad to item shortcuts).
 - Free: no cost, no cooldown.
 
 Everything you see is the game's own: Mystic Spearhand's Skydragon's Fangtooth sparks and sounds, the Frost
 Boon shimmer of your weapon, and the Mage's casting animation. No game files are included or replaced.
 
-Current version: **0.8.0**. Download it from [Releases](../../releases).
+Current version: **0.8.1**. Download it from [Releases](../../releases).
 
 ## Requirements
 
@@ -40,9 +41,9 @@ Current version: **0.8.0**. Download it from [Releases](../../releases).
 
 ## Settings
 
-Press **Insert** → *Script Generated UI* → **Dimension Door v0.8.0**:
+Press **Insert** → *Script Generated UI* → **Dimension Door v0.8.1**:
 
-- **Enabled**, **Key** (click to change), **Gamepad: hold L1 + d-pad up**
+- **Enabled**, **Key** (click to change), **Hold Vocation Action + Go!** (shows whether the button is seen as held)
 - **Max range (ft)**, **Door stays open (s)**, **Door height offset (m)**
 - **Casting animation while aiming**, **Arrival scene** (off = instant teleport), **Camera flight (s)**
 - **Sounds**, **Default**

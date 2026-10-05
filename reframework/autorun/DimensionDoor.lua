@@ -1,14 +1,14 @@
--- Dimension Door (D&D style) - Dragon's Dogma 2 (REFramework script) v0.8.0
--- Press B (keyboard) or hold L1 + d-pad up (gamepad): your character starts casting (Mage casting animation) and
--- a beam goes from your eyes to where the camera aims, up to 500 ft; it stops at the first thing it hits (or
--- ends in the air). Sparks mark the spot. Press again: the spot is locked and a door of frost shimmer opens next
+-- Dimension Door (D&D style) - Dragon's Dogma 2 (REFramework script) v0.8.1
+-- Press B (keyboard) or hold Vocation Action + give Go! (gamepad default: R1 + d-pad up): your character starts
+-- casting (Mage casting animation) and a beam goes from your eyes to where the camera aims, up to 500 ft; it
+-- stops at the first thing it hits (or ends in the air). Sparks mark the spot. Press again: the spot is locked and a door of frost shimmer opens next
 -- to you. Walk through it: the camera flies to the destination, a door opens there, your character steps out of
 -- it facing the camera, and the camera swings back behind you. Press once more to close an open door.
 -- Effects/sounds borrowed from Mystic Spearhand's Skydragon's Fangtooth, the door from the Frost Boon shimmer.
 -- Needs _ScriptCore (autorun/_SharedCore) for the ground checks.
 -- REFramework menu (Insert) > Script Generated UI > Dimension Door. Uninstall: delete this file.
 
-local VERSION = "0.8.0"
+local VERSION = "0.8.1"
 local CONFIG_FILE = "DimensionDoor.json"
 local LOG_FILE = "DimensionDoor_debug.json"
 local FT = 0.3048
@@ -16,8 +16,7 @@ local FT = 0.3048
 local DEFAULTS = {
     enabled = true,
     key = 0x42,             -- B
-    pad_combo = true,       -- gamepad: hold L1 + d-pad up; pawn commands are blocked while L1 is held
-    pad_bits = {},          -- learned: the game's action bits each d-pad direction sets (the pawn commands)
+    pad_combo = true,       -- hold Vocation Action + Go! (default R1 + d-pad up); pawn commands blocked meanwhile
     cast_anim = true,       -- Mage spell-casting animation while aiming
     max_ft = 500,
     door_time = 60,         -- an open door closes by itself after this many seconds
@@ -703,46 +702,34 @@ local function stick_for(dx, dz, strength)
 end
 
 ------------------------------------------------------------------------
--- gamepad: raw buttons from via.hid.GamePad (LUp 1, LDown 2, LLeft 4, LRight 8, L1 256, R1 1024). In the
--- player's own input, right after the game filled it: a d-pad press without L1/R1 teaches us which action bits
--- that direction sets (the pawn commands); while L1 is held those bits are cleared, so the pawns get no command.
+-- the combo (v0.8.1): hold the game's VOCATION ACTION + give the GO! command - whatever buttons those are bound
+-- to (default R1 + d-pad up). The player's app.UserInput flag words have one bit per app.CharacterInput.Action:
+-- Come 17, Go 18, Help 19, Wait 20 (the d-pad pawn commands), JobSpecialAction 29 (vocation action). While the
+-- vocation action is held the four pawn-command bits are cleared, so the pawns get no command (like the weapon
+-- skill button + d-pad switching the d-pad to item shortcuts).
 ------------------------------------------------------------------------
-local PAD_L1, PAD_R1 = 256, 1024
-local PAD_DIRS = { up = 1, down = 2, left = 4, right = 8 }
 local BTN_FIELDS = { "ButtonOnFlags", "ButtonTriggerFlags", "ButtonReleaseFlags", "ButtonRepeatFlags" }
-local padNow, padPrev = 0, 0
-local padComboPressed = false -- L1 + d-pad up pressed; picked up by the update step
-local gpGetMerged = sdk.find_type_definition("via.hid.GamePad"):get_method("get_MergedDevice")
-local function read_pad()
-    local ok, b = pcall(function()
-        local dev = gpGetMerged:call(nil)
-        return dev and dev:call("get_Button") or 0
-    end)
-    return ok and (b or 0) or 0
-end
+local ACT_GO, ACT_VOCATION = 1 << 18, 1 << 29
+local PAWN_COMMANDS = (1 << 17) | (1 << 18) | (1 << 19) | (1 << 20)
+local padComboPressed = false -- vocation action + Go! pressed; picked up by the update step
+local vocationHeld, vocationSeen = false, 0
 
 local function pad_filter(inp)
-    padPrev, padNow = padNow, read_pad()
-    local l1 = (padNow & PAD_L1) ~= 0
-    if l1 and (padNow & PAD_DIRS.up) ~= 0 and (padPrev & PAD_DIRS.up) == 0 then padComboPressed = true end
+    local on = inp:get_field("ButtonOnFlags") or 0
     local trig = inp:get_field("ButtonTriggerFlags") or 0
-    for name, bit in pairs(PAD_DIRS) do
-        if (padNow & bit) ~= 0 and (padPrev & bit) == 0 and (padNow & (PAD_L1 | PAD_R1)) == 0 and trig ~= 0
-            and config.pad_bits[name] ~= trig then
-            config.pad_bits[name] = trig
-            save_config()
-        end
-    end
-    if l1 and (padNow & 15) ~= 0 then
-        local mask = 0
-        for name, bit in pairs(PAD_DIRS) do
-            if (padNow & bit) ~= 0 then mask = mask | (config.pad_bits[name] or 0) end
-        end
-        if mask ~= 0 then
-            for _, f in ipairs(BTN_FIELDS) do
-                pcall(function() inp:set_field(f, (inp:get_field(f) or 0) & ~mask) end)
-            end
-        end
+    local rel = inp:get_field("ButtonReleaseFlags") or 0
+    -- held from its press until its release: while we block input (aiming) the game stops reporting the button
+    -- as held after the first frame, so "on" alone would lose it (user: couldn't close the door holding L1)
+    if ((on | trig) & ACT_VOCATION) ~= 0 then vocationHeld, vocationSeen = true, os.clock() end
+    if (rel & ACT_VOCATION) ~= 0 then vocationHeld = false end
+    -- safety: never block the pawn commands for long if a release went unreported
+    if vocationHeld and os.clock() - vocationSeen > 10.0 then vocationHeld = false end
+    -- while aiming every input is blocked (so the held Vocation Action isn't reported after its first frame):
+    -- Go! alone locks the target then
+    if (trig & ACT_GO) ~= 0 and (vocationHeld or state == "aiming") then padComboPressed = true end
+    if not vocationHeld then return end
+    for _, f in ipairs(BTN_FIELDS) do
+        pcall(function() inp:set_field(f, (inp:get_field(f) or 0) & ~PAWN_COMMANDS) end)
     end
 end
 
@@ -1031,14 +1018,9 @@ re.on_draw_ui(function()
     elseif imgui.button("Key: " .. (KEY_NAMES[config.key] or tostring(config.key)) .. " (click to change)") then
         waitingKey = true
     end
-    c, config.pad_combo = imgui.checkbox("Gamepad: hold L1 + d-pad up", config.pad_combo); changed = changed or c
+    c, config.pad_combo = imgui.checkbox("Hold Vocation Action + Go! (default R1 + d-pad up)", config.pad_combo); changed = changed or c
     if config.pad_combo then
-        local learned = {}
-        for _, n in ipairs({ "up", "down", "left", "right" }) do
-            if config.pad_bits[n] then learned[#learned + 1] = n end
-        end
-        imgui.text("  Pawn commands blocked while L1 is held: " .. (#learned > 0 and table.concat(learned, ", ")
-            or "none learned yet - give each d-pad command once without L1"))
+        imgui.text("  Vocation Action: " .. (vocationHeld and "HELD (pawn commands blocked)" or "not held"))
     end
     c, config.max_ft = imgui.slider_int("Max range (ft)", config.max_ft, 30, 1000); changed = changed or c
     c, config.door_time = imgui.slider_int("Door stays open (s)", config.door_time, 5, 300); changed = changed or c
@@ -1050,9 +1032,7 @@ re.on_draw_ui(function()
     end
     c, config.sounds = imgui.checkbox("Sounds", config.sounds); changed = changed or c
     if imgui.button("Default") then
-        local learned = config.pad_bits
         for k, v in pairs(DEFAULTS) do config[k] = copy(v) end
-        config.pad_bits = learned -- keep what was learned about the d-pad
         changed = true
     end
     local st = "ready"

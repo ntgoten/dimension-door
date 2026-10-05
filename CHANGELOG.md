@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.1
+- Gamepad combo follows the game's controls: hold the **Vocation Action** button and give **Go!** (default
+  R1 + d-pad up) instead of a fixed L1. Pawn commands are blocked while the Vocation Action is held; no learning
+  step any more.
+- While aiming, Go! alone locks the target; the held button is tracked through the cast, so closing the door
+  with the combo works while still holding it.
+
 ## 0.8.0
 First public release.
 - Beam from the eyes to the camera aim (up to 500 ft), stops at the first surface; sparks mark the target.
