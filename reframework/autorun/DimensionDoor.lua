@@ -1,15 +1,16 @@
--- Dimension Door (D&D style) - Dragon's Dogma 2 (REFramework script) v0.8.2
+-- Dimension Door (D&D style) - Dragon's Dogma 2 (REFramework script) v0.8.3
 -- Press B (keyboard) or hold Vocation Action + give Go! (gamepad default: R1 + d-pad up): your character starts
 -- casting (Mage casting animation) and a beam goes from your eyes to where the camera aims, up to 500 ft; it
 -- stops at the first thing it hits (or ends in the air). Sparks mark the spot. Press again: the spot is locked and a door of frost shimmer opens next
 -- to you. Walk through it: the camera flies to the destination, a door opens there, your character steps out of
 -- it facing the camera, and the camera swings back behind you. Press once more to close an open door.
--- Effects/sounds borrowed from Mystic Spearhand's Skydragon's Fangtooth, the door from the Frost Boon shimmer
--- (its effect file is played directly, so no frost weapon is needed).
+-- Effects/sounds borrowed from Mystic Spearhand's Skydragon's Fangtooth; the door is a Frost Boon shimmer frame with
+-- frost wisps and a soft light inside (classic look: frame only); the camera flight plays the ferrystone warp sound.
+-- No frost weapon is needed.
 -- Needs _ScriptCore (autorun/_SharedCore) for the ground checks.
 -- REFramework menu (Insert) > Script Generated UI > Dimension Door. Uninstall: delete this file.
 
-local VERSION = "0.8.2"
+local VERSION = "0.8.3"
 local CONFIG_FILE = "DimensionDoor.json"
 local LOG_FILE = "DimensionDoor_debug.json"
 local FT = 0.3048
@@ -25,6 +26,13 @@ local DEFAULTS = {
     sounds = true,
     cutscene = true,        -- arrival scene; off = plain instant teleport
     fly_time = 1.6,         -- camera flight to the destination (s)
+    glow_fill = true,       -- soft glow inside the door frame
+    glow_scale = 1.0,       -- its size
+    glow_y = 0.10,          -- its height within the door (0 = bottom, 1 = top)
+    fill_wisps = 6,         -- frost wisps inside the doorway (0 = frame only)
+    wisp_w = 1.22,          -- wisps stretched sideways
+    wisp_h = 1.10,          -- wisps stretched upward
+    door_style = 1,         -- 1 = shimmer frame + wisps + glow, 2 = classic (shimmer frame only, v0.8.2)
 }
 
 -- fixed settings
@@ -38,6 +46,7 @@ local GROUND_LAYERS = { 2, 23, 24 } -- 2 = open world; 23/24 = town ground and b
 local SPARK_EFX, BURST_EFX, DOOR_EFX = { 14, 7, 11 }, { 13, 0, 10 }, { 14, 7, 10 }
 local ARRIVE_EFX = { { 14, 7, 11 }, { 13, 0, 10 } }
 local OPEN_SOUND, ARRIVE_SOUND = 1717783091, 2823464530
+local TRAVEL_SOUND = 249171544   -- the port crystal / ferrystone warp, during the camera flight
 
 local function copy(v)
     if type(v) ~= "table" then return v end
@@ -158,14 +167,17 @@ end
 -- via.effect.EffectPlayer on each of the door's anchor objects - no weapon or enchant needed. It loops until the
 -- anchor is destroyed when the door closes. Fallback: ElementID 25 from the held weapon's own effect list.
 local SHIMMER_EFX = "vfx/effects/weapon/wp00/009/13_wp00_009_enchant_25.efx"
-local shimmerRes
-local function shimmer_player(parentGo)
-    if not shimmerRes then
-        local res = sdk.create_resource("via.effect.EffectResource", SHIMMER_EFX)
+-- the glow inside the door: a cutscene light-aura effect from the game, re-started while the door is open
+local GLOW_EFX = "vfx/event/effects/cutscene/cs0220/s20/13_cs0220_s20_env_main02_glow_00.efx"
+local GLOW_REPEAT = 4.0
+local efxRes = {}
+local function efx_player(parentGo, path)
+    if not efxRes[path] then
+        local res = sdk.create_resource("via.effect.EffectResource", path)
         if not res then return nil end
-        shimmerRes = res:add_ref()
+        efxRes[path] = res:add_ref()
     end
-    local holder = shimmerRes:create_holder("via.effect.EffectResourceHolder")
+    local holder = efxRes[path]:create_holder("via.effect.EffectResourceHolder")
     if not holder then return nil end
     holder = holder:add_ref()
     local ep = parentGo:call("createComponent(System.Type)", sdk.typeof("via.effect.EffectPlayer"))
@@ -183,7 +195,7 @@ local function weapon_fx_mgr(p)
 end
 
 local function shimmer_on(p, parentGo)
-    local okP, ep = pcall(shimmer_player, parentGo)
+    local okP, ep = pcall(efx_player, parentGo, SHIMMER_EFX)
     if okP and ep then return ep end
     local ok, res = pcall(function()
         local mgr = weapon_fx_mgr(p)
@@ -194,6 +206,58 @@ local function shimmer_on(p, parentGo)
         eid.ElementID = 25
         eid.IsContainerIDOnly = false
         eid.IsElementIDOnly = false
+        return mgr:call("requestEffect(via.effect.script.EffectID, via.GameObject, System.Int32, via.effect.script.EffectManager.WwiseTriggerInfo)",
+            eid, parentGo, -1, nil)
+    end)
+    if ok and res then return res:add_ref() end
+    return nil
+end
+
+-- frost wisps (Frost Boon's floating particles) inside the door. The wisps only show when a weapon's own effect
+-- manager creates them (played from their file they stay invisible, even with the weapon's settings), so the door
+-- borrows one: a Stalwart Sword spawned from the game's weapon catalog (app.EquipmentManager.requestInstantiate),
+-- kept hidden and reused; its effect manager plays element 20 on the door's anchors. Falls back to the held weapon.
+local DONOR_WEAPON = 3368873434   -- app.WeaponID of the Stalwart Sword (wp00_009)
+local donor = nil                 -- { go, mgr, ours }
+local function donor_mgr(p)
+    if donor then
+        local alive = false
+        pcall(function() alive = donor.go:get_Name() ~= nil and donor.mgr ~= nil end)
+        if alive then return donor.mgr end
+        donor = nil
+    end
+    local owner = sdk.find_type_definition("via.GameObject"):get_method("create(System.String, via.Folder)"):call(nil, "DimensionDoor_donor", 0):add_ref()
+    owner:call(".ctor"); owner:set_Name("DimensionDoor_donor")
+    pcall(function()
+        local pos = p:get_GameObject():get_Transform():get_Position()
+        owner:get_Transform():set_Position(Vector3f.new(pos.x, pos.y - 50, pos.z))    -- out of sight
+    end)
+    local em = sdk.get_managed_singleton("app.EquipmentManager")
+    em:call("requestInstantiate(app.WeaponID, via.Component, System.Action`1<app.PrefabInstantiateResults>, System.Func`2<app.PrefabInstantiateArgs.DummyArg2,System.Boolean>)",
+        DONOR_WEAPON, owner:get_Transform(), nil, nil)
+    local scene = sdk.call_native_func(sdk.get_native_singleton("via.SceneManager"), sdk.find_type_definition("via.SceneManager"), "get_CurrentScene()")
+    local go = scene:call("findGameObject(System.String)", "wp00_009_00")
+    if not go then return nil end
+    go = go:add_ref()
+    local mgr = go:call("getComponent(System.Type)", sdk.typeof("via.effect.script.ObjectEffectManager2"))
+    if not mgr then return nil end
+    -- ours = spawned under our owner object (not someone's real Stalwart Sword): hide it
+    local ours = false
+    pcall(function() ours = go:get_Transform():call("get_Parent") == owner:get_Transform() end)
+    if ours then pcall(function() go:call("set_DrawSelf", false) end) end
+    donor = { go = go, mgr = mgr:add_ref(), ours = ours, owner = owner }
+    event("wisps donor sword ready (" .. (ours and "spawned, hidden" or "existing sword reused") .. ")")
+    return donor.mgr
+end
+
+local function wisps_on(p, parentGo)
+    local ok, res = pcall(function()
+        local okD, mgr = pcall(donor_mgr, p)
+        if not okD or not mgr then mgr = weapon_fx_mgr(p) end
+        if not mgr then return nil end
+        local eid = sdk.create_instance("via.effect.script.EffectID")
+        eid.DataContainerIndex = -1; eid.ContainerID = 0; eid.ElementID = 20
+        eid.IsContainerIDOnly = false; eid.IsElementIDOnly = false
         return mgr:call("requestEffect(via.effect.script.EffectID, via.GameObject, System.Int32, via.effect.script.EffectManager.WwiseTriggerInfo)",
             eid, parentGo, -1, nil)
     end)
@@ -217,12 +281,11 @@ local function finish_door(d)
     if d.remote then finish_door(d.remote) end
     for _, c in ipairs(d.fx or {}) do pcall(finish_effect, c) end
     for _, go in ipairs(d.gos or {}) do pcall(function() go:call("destroy(via.GameObject)", go) end) end
-    d.fx, d.gos = nil, nil
+    for _, gl in ipairs(d.glows or {}) do pcall(function() gl.go:call("destroy(via.GameObject)", gl.go) end) end
+    d.fx, d.gos, d.glows, d.wispGos, d.wispScaled = nil, nil, nil, nil, nil
 end
 
-local function play_sound(p, triggerId)
-    if not config.sounds then return end
-    local go = p:get_GameObject()
+local function trigger_in(go, triggerId)
     for _, sc in ipairs(components_of(go, "soundlib.SoundContainer")) do
         local ok, done = pcall(function()
             for _, info in pairs(sc._TriggerInfoList._items) do
@@ -239,11 +302,29 @@ local function play_sound(p, triggerId)
             end
             return false
         end)
-        if ok and done then return end
+        if ok and done then return true end
     end
+    return false
 end
 
-------------------------------------------------------------------------
+-- the player's own sound containers first, then the game's resident sound objects (e.g. the port crystal warp)
+local SOUND_OBJECTS = { "SoundResident", "UI_Sound" }
+local function play_sound(p, triggerId)
+    if not config.sounds then return false end
+    if trigger_in(p:get_GameObject(), triggerId) then return true end
+    local scene
+    pcall(function()
+        scene = sdk.call_native_func(sdk.get_native_singleton("via.SceneManager"), sdk.find_type_definition("via.SceneManager"), "get_CurrentScene()")
+    end)
+    if not scene then return false end
+    for _, name in ipairs(SOUND_OBJECTS) do
+        local go
+        pcall(function() go = scene:call("findGameObject(System.String)", name) end)
+        if go and trigger_in(go, triggerId) then return true end
+    end
+    return false
+end
+
 -- collision checks: _ScriptCore's cast_ray. Open-world terrain answers sphere casts, town ground thin rays;
 -- quest volumes, trigger areas and characters are skipped by name.
 ------------------------------------------------------------------------
@@ -590,6 +671,31 @@ local function draw_door(p, d)
     local c = Vector3f.new(c0.x, c0.y + config.door_offset, c0.z)
     local rx, rz = -d.nz, d.nx
     local rot = yaw_rotation(d.nx, d.nz)
+    if d.wispGos and (d.wispScaled ~= config.wisp_w * 1000 + config.wisp_h) then   -- stretch the wisps (live)
+        d.wispScaled = config.wisp_w * 1000 + config.wisp_h
+        for _, go in ipairs(d.wispGos) do
+            pcall(function() go:get_Transform():set_LocalScale(Vector3f.new(config.wisp_w, config.wisp_h, config.wisp_w)) end)
+        end
+    end
+    if config.glow_fill and config.door_style == 1 then   -- glow inside the frame, re-started before it fades
+        local now = os.clock()
+        d.glows = d.glows or {}
+        if now >= (d.nextGlow or 0) then
+            d.nextGlow = now + GLOW_REPEAT
+            local ok, go = pcall(make_anchor, "DimensionDoor_glow", Vector3f.new(c.x, c.y + h * config.glow_y, c.z), rot)
+            if ok and go then
+                pcall(function() go:get_Transform():set_LocalScale(Vector3f.new(config.glow_scale, config.glow_scale, config.glow_scale)) end)
+                pcall(efx_player, go, GLOW_EFX)
+                d.glows[#d.glows + 1] = { go = go, untilT = now + GLOW_REPEAT * 2 }
+            end
+        end
+        for i = #d.glows, 1, -1 do
+            if now > d.glows[i].untilT then
+                pcall(function() d.glows[i].go:call("destroy(via.GameObject)", d.glows[i].go) end)
+                table.remove(d.glows, i)
+            end
+        end
+    end
     if not d.fx and not d.noShimmer then
         d.fx, d.gos = {}, {}
         local per = h * 2 + w * 2
@@ -603,6 +709,22 @@ local function draw_door(p, d)
             if ok and go then
                 d.gos[#d.gos + 1] = go
                 local fx = shimmer_on(p, go)
+                if fx then d.fx[#d.fx + 1] = fx end
+            end
+        end
+        -- frost wisps inside the doorway: a grid of 3 columns, rows spread over the height, slightly staggered
+        local n = config.door_style == 1 and math.floor(config.fill_wisps or 0) or 0
+        local rows = math.ceil(n / 3)
+        for k = 0, n - 1 do
+            local col, row = k % 3, math.floor(k / 3)
+            local sx = (col - 1) * w * 0.55
+            local y = h * (row + 0.5 + (col == 1 and 0.25 or 0)) / (rows + 0.5)
+            local ok, go = pcall(make_anchor, "DimensionDoor_wisp", Vector3f.new(c.x + rx * sx, c.y + y, c.z + rz * sx), rot)
+            if ok and go then
+                d.gos[#d.gos + 1] = go
+                d.wispGos = d.wispGos or {}
+                d.wispGos[#d.wispGos + 1] = go
+                local fx = wisps_on(p, go)
                 if fx then d.fx[#d.fx + 1] = fx end
             end
         end
@@ -871,6 +993,7 @@ local function start_scene(p, dest, dist, dx, dz, air, groundY)
         rot = yaw_rotation(dx, dz), dx = dx, dz = dz, hop = math.min(30.0, dist * 0.25), air = air, groundY = groundY }
     inputLocked = true
     camOverride = { pos = cam.pos, rot = cam.rot }
+    play_sound(p, TRAVEL_SOUND)
     event(string.format("stepped through: %.0f ft", dist / FT))
 end
 
@@ -1048,6 +1171,17 @@ re.on_draw_ui(function()
     c, config.max_ft = imgui.slider_int("Max range (ft)", config.max_ft, 30, 1000); changed = changed or c
     c, config.door_time = imgui.slider_int("Door stays open (s)", config.door_time, 5, 300); changed = changed or c
     c, config.door_offset = imgui.slider_float("Door height offset (m)", config.door_offset, -2.0, 2.0, "%.1f"); changed = changed or c
+    c, config.door_style = imgui.combo("Door look", config.door_style, { "Shimmer frame + wisps + glow", "Classic (shimmer frame only)" }); changed = changed or c
+    if config.door_style == 1 then
+    c, config.fill_wisps = imgui.slider_int("Wisps inside the door", config.fill_wisps, 0, 12); changed = changed or c
+    c, config.wisp_w = imgui.slider_float("Wisps width", config.wisp_w, 0.2, 4.0, "%.2f"); changed = changed or c
+    c, config.wisp_h = imgui.slider_float("Wisps height", config.wisp_h, 0.2, 4.0, "%.2f"); changed = changed or c
+    c, config.glow_fill = imgui.checkbox("Glow inside the door", config.glow_fill); changed = changed or c
+    end
+    if config.glow_fill and config.door_style == 1 then
+        c, config.glow_scale = imgui.slider_float("Glow size", config.glow_scale, 0.2, 3.0, "%.2f"); changed = changed or c
+        c, config.glow_y = imgui.slider_float("Glow height in the door", config.glow_y, 0.0, 1.0, "%.2f"); changed = changed or c
+    end
     c, config.cast_anim = imgui.checkbox("Casting animation while aiming", config.cast_anim); changed = changed or c
     c, config.cutscene = imgui.checkbox("Arrival scene (camera flies, you walk out)", config.cutscene); changed = changed or c
     if config.cutscene then

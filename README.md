@@ -9,10 +9,10 @@ at the destination.
   spell-casting animation and turns to where you aim. A beam goes from your eyes to where the camera
   points and stops at the first thing it hits (ground, a wall, a roof); sparks mark the spot. If it hits
   nothing it ends in the air 500 ft away.
-- **Open the door:** press again (on gamepad, d-pad up alone works while aiming). The target is locked and a door of frost shimmer opens right next to you,
-  toward the camera, even in the air at a roof edge. A matching door appears at the destination too (just
+- **Open the door:** press again (on gamepad, d-pad up alone works while aiming). The target is locked and a door opens right next to you: a frost-shimmer frame
+  with frost wisps and a soft light inside (or the classic shimmer-only frame), toward the camera, even in the air at a roof edge. A matching door appears at the destination too (just
   for show).
-- **Walk through it:** the camera flies to the destination, a door opens there, your character steps out of
+- **Walk through it:** the camera flies to the destination (with the ferrystone warp sound), a door opens there, your character steps out of
   it toward the camera, and the camera swings back behind you. Press once more to close an open door; it also
   closes by itself after a minute.
 - **Gamepad:** while the Vocation Action button is held, the d-pad doesn't give pawn commands (like holding the
@@ -20,9 +20,10 @@ at the destination.
 - Free: no cost, no cooldown.
 
 Everything you see is the game's own: Mystic Spearhand's Skydragon's Fangtooth sparks and sounds, the Frost
-Boon shimmer (played from the game's own effect file, no frost weapon needed), and the Mage's casting animation. No game files are included or replaced.
+Boon shimmer and wisps, a cutscene light glow, the ferrystone warp sound and the Mage's casting animation. No frost
+weapon is needed (the wisps come from a hidden Stalwart Sword the mod spawns from the game's weapon catalog). No game files are included or replaced.
 
-Current version: **0.8.2**. Download it from [Releases](../../releases).
+Current version: **0.8.3**. Download it from [Releases](../../releases).
 
 ## Requirements
 
@@ -41,10 +42,12 @@ Current version: **0.8.2**. Download it from [Releases](../../releases).
 
 ## Settings
 
-Press **Insert** → *Script Generated UI* → **Dimension Door v0.8.2**:
+Press **Insert** → *Script Generated UI* → **Dimension Door v0.8.3**:
 
 - **Enabled**, **Key** (click to change), **Hold Vocation Action + Go!** (shows whether the button is seen as held)
 - **Max range (ft)**, **Door stays open (s)**, **Door height offset (m)**
+- **Door look** (shimmer frame + wisps + glow, or classic), **Wisps inside the door**, **Wisps width/height**,
+  **Glow inside the door**, **Glow size**, **Glow height in the door**
 - **Casting animation while aiming**, **Arrival scene** (off = instant teleport), **Camera flight (s)**
 - **Sounds**, **Default**
 

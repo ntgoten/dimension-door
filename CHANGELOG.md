@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.3
+- New default door look: the frost-shimmer frame now has frost wisps and a soft light inside. Works with any
+  weapon or none (the wisps come from a hidden Stalwart Sword the mod spawns from the game's weapon catalog).
+- The previous look is still there: **Door look → Classic (shimmer frame only)**.
+- New settings: number of wisps, wisps width/height, glow on/off, glow size and height.
+- The camera flight to the destination plays the ferrystone warp sound.
+
 ## 0.8.2
 - The door's frost shimmer now shows with any weapon (or none). It used to be borrowed from the held weapon's
   effects, which only had it on swords or frost-enchanted weapons; other weapons got the plain spark frame.
