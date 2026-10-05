@@ -1,14 +1,15 @@
--- Dimension Door (D&D style) - Dragon's Dogma 2 (REFramework script) v0.8.1
+-- Dimension Door (D&D style) - Dragon's Dogma 2 (REFramework script) v0.8.2
 -- Press B (keyboard) or hold Vocation Action + give Go! (gamepad default: R1 + d-pad up): your character starts
 -- casting (Mage casting animation) and a beam goes from your eyes to where the camera aims, up to 500 ft; it
 -- stops at the first thing it hits (or ends in the air). Sparks mark the spot. Press again: the spot is locked and a door of frost shimmer opens next
 -- to you. Walk through it: the camera flies to the destination, a door opens there, your character steps out of
 -- it facing the camera, and the camera swings back behind you. Press once more to close an open door.
--- Effects/sounds borrowed from Mystic Spearhand's Skydragon's Fangtooth, the door from the Frost Boon shimmer.
+-- Effects/sounds borrowed from Mystic Spearhand's Skydragon's Fangtooth, the door from the Frost Boon shimmer
+-- (its effect file is played directly, so no frost weapon is needed).
 -- Needs _ScriptCore (autorun/_SharedCore) for the ground checks.
 -- REFramework menu (Insert) > Script Generated UI > Dimension Door. Uninstall: delete this file.
 
-local VERSION = "0.8.1"
+local VERSION = "0.8.2"
 local CONFIG_FILE = "DimensionDoor.json"
 local LOG_FILE = "DimensionDoor_debug.json"
 local FT = 0.3048
@@ -153,8 +154,28 @@ local function play_efx(p, ids, pos, rot, life)
     return false
 end
 
--- the Frost Boon "shimmer": ElementID 25 in the held weapon's own effect list. It loops until finished, so the
--- door's pieces are spawned once (each on its own small anchor object) and switched off when the door closes.
+-- the Frost Boon "shimmer": the Stalwart Sword's frost enchant effect file, played on a standalone
+-- via.effect.EffectPlayer on each of the door's anchor objects - no weapon or enchant needed. It loops until the
+-- anchor is destroyed when the door closes. Fallback: ElementID 25 from the held weapon's own effect list.
+local SHIMMER_EFX = "vfx/effects/weapon/wp00/009/13_wp00_009_enchant_25.efx"
+local shimmerRes
+local function shimmer_player(parentGo)
+    if not shimmerRes then
+        local res = sdk.create_resource("via.effect.EffectResource", SHIMMER_EFX)
+        if not res then return nil end
+        shimmerRes = res:add_ref()
+    end
+    local holder = shimmerRes:create_holder("via.effect.EffectResourceHolder")
+    if not holder then return nil end
+    holder = holder:add_ref()
+    local ep = parentGo:call("createComponent(System.Type)", sdk.typeof("via.effect.EffectPlayer"))
+    if not ep then return nil end
+    ep = ep:add_ref()
+    ep:call("set_Resource", holder)
+    pcall(function() ep:call("set_AutoStart", true) end)
+    return ep
+end
+
 local function weapon_fx_mgr(p)
     local w = p._WeaponElementController:call("getWeapon(System.Boolean)", false)
     local go = w and w:get_GameObject()
@@ -162,6 +183,8 @@ local function weapon_fx_mgr(p)
 end
 
 local function shimmer_on(p, parentGo)
+    local okP, ep = pcall(shimmer_player, parentGo)
+    if okP and ep then return ep end
     local ok, res = pcall(function()
         local mgr = weapon_fx_mgr(p)
         if not mgr then return nil end
@@ -560,8 +583,8 @@ open_door = function(p)
     event(string.format("door opened, destination %.0f ft away", s.dist / FT))
 end
 
--- the door's look: the frost shimmer along the frame, spawned once (it loops); Fangtooth sparks if there's no
--- weapon to borrow the shimmer from
+-- the door's look: the frost shimmer along the frame, spawned once (it loops); Fangtooth sparks if the shimmer
+-- can't be loaded
 local function draw_door(p, d)
     local c0, w, h = d.center, DOOR_WIDTH / 2, DOOR_HEIGHT
     local c = Vector3f.new(c0.x, c0.y + config.door_offset, c0.z)

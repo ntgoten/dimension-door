@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.8.2
+- The door's frost shimmer now shows with any weapon (or none). It used to be borrowed from the held weapon's
+  effects, which only had it on swords or frost-enchanted weapons; other weapons got the plain spark frame.
+  The shimmer's effect file is now played directly.
+
 ## 0.8.1
 - Gamepad combo follows the game's controls: hold the **Vocation Action** button and give **Go!** (default
   R1 + d-pad up) instead of a fixed L1. Pawn commands are blocked while the Vocation Action is held; no learning

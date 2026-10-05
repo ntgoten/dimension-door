@@ -20,9 +20,9 @@ at the destination.
 - Free: no cost, no cooldown.
 
 Everything you see is the game's own: Mystic Spearhand's Skydragon's Fangtooth sparks and sounds, the Frost
-Boon shimmer of your weapon, and the Mage's casting animation. No game files are included or replaced.
+Boon shimmer (played from the game's own effect file, no frost weapon needed), and the Mage's casting animation. No game files are included or replaced.
 
-Current version: **0.8.1**. Download it from [Releases](../../releases).
+Current version: **0.8.2**. Download it from [Releases](../../releases).
 
 ## Requirements
 
@@ -41,7 +41,7 @@ Current version: **0.8.1**. Download it from [Releases](../../releases).
 
 ## Settings
 
-Press **Insert** → *Script Generated UI* → **Dimension Door v0.8.1**:
+Press **Insert** → *Script Generated UI* → **Dimension Door v0.8.2**:
 
 - **Enabled**, **Key** (click to change), **Hold Vocation Action + Go!** (shows whether the button is seen as held)
 - **Max range (ft)**, **Door stays open (s)**, **Door height offset (m)**
@@ -63,7 +63,6 @@ Delete `reframework/autorun/DimensionDoor.lua` (and `reframework/data/DimensionD
   fizzle. A target in mid-air means you appear there and fall.
 - While casting (and during the short release) your character doesn't react to anything else.
 - The casting animation is made for a staff, so with other weapons the hands are posed for a staff.
-- The door's shimmer is borrowed from your held weapon; without a weapon the door is drawn with sparks.
 - Single-player only. Your character only (pawns are not taken along unless you carry one).
 
 ## Credits
