@@ -1,0 +1,999 @@
+-- Dimension Door (D&D style) - Dragon's Dogma 2 (REFramework script) v0.7.7
+-- Press B (keyboard) or hold L1 + d-pad up (gamepad): your character starts casting (Mage casting animation) and
+-- a beam goes from your eyes to where the camera aims, up to 500 ft; it stops at the first thing it hits (or
+-- ends in the air). Sparks mark the spot. Press again: the spot is locked and a door of frost shimmer opens next
+-- to you. Walk through it: the camera flies to the destination, a door opens there, your character steps out of
+-- it facing the camera, and the camera swings back behind you. Press once more to close an open door.
+-- Effects/sounds borrowed from Mystic Spearhand's Skydragon's Fangtooth, the door from the Frost Boon shimmer.
+-- Needs _ScriptCore (autorun/_SharedCore) for the ground checks.
+-- REFramework menu (Insert) > Script Generated UI > Dimension Door. Uninstall: delete this file.
+
+local VERSION = "0.7.7"
+local CONFIG_FILE = "DimensionDoor.json"
+local LOG_FILE = "DimensionDoor_debug.json"
+local FT = 0.3048
+
+local DEFAULTS = {
+    enabled = true,
+    key = 0x42,             -- B
+    pad_combo = true,       -- gamepad: hold L1 + d-pad up; pawn commands are blocked while L1 is held
+    pad_bits = {},          -- learned: the game's action bits each d-pad direction sets (the pawn commands)
+    cast_anim = true,       -- Mage spell-casting animation while aiming
+    max_ft = 500,
+    door_time = 60,         -- an open door closes by itself after this many seconds
+    door_offset = -0.4,     -- the door's look moved up/down (m); the spot you walk through stays at your feet
+    sounds = true,
+    cutscene = true,        -- arrival scene; off = plain instant teleport
+    fly_time = 1.6,         -- camera flight to the destination (s)
+}
+
+-- fixed settings
+local EYE_HEIGHT = 1.6
+local DOOR_DISTANCE, DOOR_WIDTH, DOOR_HEIGHT = 2.5, 1.4, 2.44 -- metres (8 ft door)
+local DOOR_POINTS = 20         -- shimmer pieces around the frame
+local TURN_TIME = 1.1          -- camera swing round behind the character at the end (s)
+local WALK_STRENGTH, WALK_TIMEOUT = 0.45, 1.0
+local GROUND_LAYERS = { 2, 23, 24 } -- 2 = open world; 23/24 = town ground and buildings
+-- { DataContainerIndex, ContainerID, ElementID } - Fangtooth's effects
+local SPARK_EFX, BURST_EFX, DOOR_EFX = { 14, 7, 11 }, { 13, 0, 10 }, { 14, 7, 10 }
+local ARRIVE_EFX = { { 14, 7, 11 }, { 13, 0, 10 } }
+local OPEN_SOUND, ARRIVE_SOUND = 1717783091, 2823464530
+
+local function copy(v)
+    if type(v) ~= "table" then return v end
+    local t = {}
+    for k, x in pairs(v) do t[k] = copy(x) end
+    return t
+end
+local config = json.load_file(CONFIG_FILE) or {}
+for k, v in pairs(DEFAULTS) do if config[k] == nil then config[k] = copy(v) end end
+for k in pairs(config) do if DEFAULTS[k] == nil then config[k] = nil end end -- drop settings of test versions
+local function save_config() json.dump_file(CONFIG_FILE, config) end
+
+local log = json.load_file(LOG_FILE)
+if type(log) ~= "table" then log = {} end
+local lastMsg = "none yet"
+local function event(msg)
+    lastMsg = msg
+    table.insert(log, os.date("%H:%M:%S") .. " " .. msg)
+    while #log > 60 do table.remove(log, 1) end
+    pcall(json.dump_file, LOG_FILE, log)
+end
+event("--- loaded v" .. VERSION .. " ---")
+
+local function player()
+    local cm = sdk.get_managed_singleton("app.CharacterManager")
+    local p = cm and cm["<ManualPlayer>k__BackingField"]
+    if p and p:get_Valid() then return p end
+end
+
+local function transform_of(chara)
+    local tr = chara["<Transform>k__BackingField"]
+    if tr then return tr end
+    return chara:get_GameObject():get_Transform()
+end
+
+local function flat_dir(x, z)
+    local len = math.sqrt(x * x + z * z)
+    if len < 0.0001 then return nil end
+    return x / len, z / len, len
+end
+
+local function forward_of(q)
+    return 2 * (q.x * q.z + q.w * q.y), 1 - 2 * (q.x * q.x + q.y * q.y)
+end
+
+local function yaw_rotation(dx, dz)
+    local yaw = math.atan(dx, dz)
+    return Quaternion.new(math.cos(yaw / 2), 0, math.sin(yaw / 2), 0)
+end
+
+local function camera_forward()
+    local m = sdk.get_primary_camera():get_WorldMatrix()
+    return flat_dir(-m[2].x, -m[2].z)
+end
+
+------------------------------------------------------------------------
+-- effects and sounds
+------------------------------------------------------------------------
+local function is_type(td, typeName)
+    while td do
+        if td:get_full_name() == typeName then return true end
+        td = td:get_parent_type()
+    end
+    return false
+end
+
+local function components_of(go, typeName)
+    local found = {}
+    pcall(function()
+        for _, c in ipairs(go:call("get_Components"):get_elements()) do
+            if is_type(c:get_type_definition(), typeName) then found[#found + 1] = c end
+        end
+    end)
+    return found
+end
+
+-- borrowed skill effects don't end on their own: every one we start is finished after its life time
+local liveEfx = {} -- { container, untilT }
+local function finish_effect(container)
+    for _, m in ipairs({ "finishAll", "finish", "killAll", "kill" }) do
+        if pcall(function() container:call(m .. "()") end) then return true end
+    end
+    return false
+end
+
+re.on_frame(function()
+    if #liveEfx == 0 then return end
+    local now = os.clock()
+    for i = #liveEfx, 1, -1 do
+        if now >= liveEfx[i].untilT then
+            pcall(finish_effect, liveEfx[i].container)
+            table.remove(liveEfx, i)
+        end
+    end
+end)
+
+local function play_efx(p, ids, pos, rot, life)
+    for _, mgr in ipairs(components_of(p:get_GameObject(), "via.effect.script.ObjectEffectManager2")) do
+        local ok, res = pcall(function()
+            local effectId = sdk.create_instance("via.effect.script.EffectID")
+            effectId.DataContainerIndex = ids[1]
+            effectId.ContainerID = ids[2]
+            effectId.ElementID = ids[3]
+            effectId.IsContainerIDOnly = false
+            effectId.IsElementIDOnly = false
+            return mgr:call("requestEffect(via.effect.script.EffectID, via.vec3, via.Quaternion, via.GameObject, System.String, via.effect.script.EffectManager.WwiseTriggerInfo)",
+                effectId, pos, rot or Quaternion.new(1, 0, 0, 0), nil, "root", nil)
+        end)
+        if ok and res then
+            pcall(function() liveEfx[#liveEfx + 1] = { container = res:add_ref(), untilT = os.clock() + (life or 1.0) } end)
+            return true
+        end
+    end
+    return false
+end
+
+-- the Frost Boon "shimmer": ElementID 25 in the held weapon's own effect list. It loops until finished, so the
+-- door's pieces are spawned once (each on its own small anchor object) and switched off when the door closes.
+local function weapon_fx_mgr(p)
+    local w = p._WeaponElementController:call("getWeapon(System.Boolean)", false)
+    local go = w and w:get_GameObject()
+    return go and go:call("getComponent(System.Type)", sdk.typeof("via.effect.script.ObjectEffectManager2"))
+end
+
+local function shimmer_on(p, parentGo)
+    local ok, res = pcall(function()
+        local mgr = weapon_fx_mgr(p)
+        if not mgr then return nil end
+        local eid = sdk.create_instance("via.effect.script.EffectID")
+        eid.DataContainerIndex = -1
+        eid.ContainerID = 0
+        eid.ElementID = 25
+        eid.IsContainerIDOnly = false
+        eid.IsElementIDOnly = false
+        return mgr:call("requestEffect(via.effect.script.EffectID, via.GameObject, System.Int32, via.effect.script.EffectManager.WwiseTriggerInfo)",
+            eid, parentGo, -1, nil)
+    end)
+    if ok and res then return res:add_ref() end
+    return nil
+end
+
+local function make_anchor(name, pos, rot)
+    local go = sdk.find_type_definition("via.GameObject"):get_method("create(System.String, via.Folder)"):call(nil, name, 0)
+    go = go:add_ref()
+    go:call(".ctor")
+    go:set_Name(name)
+    local tr = go:get_Transform()
+    tr:set_Position(pos)
+    if rot then tr:set_Rotation(rot) end
+    return go
+end
+
+local function finish_door(d)
+    if not d then return end
+    for _, c in ipairs(d.fx or {}) do pcall(finish_effect, c) end
+    for _, go in ipairs(d.gos or {}) do pcall(function() go:call("destroy(via.GameObject)", go) end) end
+    d.fx, d.gos = nil, nil
+end
+
+local function play_sound(p, triggerId)
+    if not config.sounds then return end
+    local go = p:get_GameObject()
+    for _, sc in ipairs(components_of(go, "soundlib.SoundContainer")) do
+        local ok, done = pcall(function()
+            for _, info in pairs(sc._TriggerInfoList._items) do
+                if info and info._TriggerId == triggerId then
+                    local req = sc:call("createRequestInfo(soundlib.SoundTriggerInfo, via.GameObject, via.GameObject, System.UInt32, System.Boolean, System.Boolean, System.UInt32, via.simplewwise.CallbackType, System.Action`1<soundlib.SoundManager.RequestInfo>, System.Action`1<soundlib.SoundManager.RequestInfo>, System.Action`1<soundlib.SoundManager.RequestInfo>, System.Action`1<soundlib.SoundManager.RequestInfo>)",
+                        info, go, go, info._OffsetJointHash, false, false, 0, 0, nil, nil, nil, nil)
+                    if req then
+                        req = req:add_ref()
+                        req["<Container>k__BackingField"] = sc
+                        sc:call("trigger(soundlib.SoundManager.RequestInfo)", req)
+                        return true
+                    end
+                end
+            end
+            return false
+        end)
+        if ok and done then return end
+    end
+end
+
+------------------------------------------------------------------------
+-- collision checks: _ScriptCore's cast_ray. Open-world terrain answers sphere casts, town ground thin rays;
+-- quest volumes, trigger areas and characters are skipped by name.
+------------------------------------------------------------------------
+local castOk, shared = pcall(require, "_SharedCore/Functions")
+local cast_ray = castOk and type(shared) == "table" and shared.cast_ray or nil
+
+local SKIP_NAMES = { "^Resource_", "^ch%d", "Area", "Trigger", "Sensor", "Volume", "Sound", "Wwise", "Event" }
+local function skipped(go)
+    local name = "?"
+    pcall(function() name = go:get_Name() end)
+    for _, pat in ipairs(SKIP_NAMES) do if name:find(pat) then return true end end
+    return false
+end
+
+-- the first surface below a start point: every variant tried, the highest surface below the start wins
+local function ground_near(x, y, z, up, down)
+    local from, to = Vector3f.new(x, y + up, z), Vector3f.new(x, y - down, z)
+    local best
+    for _, layer in ipairs(GROUND_LAYERS) do
+        for _, opt in ipairs({ 1, 0 }) do
+            for _, radius in ipairs({ 0.1, false }) do
+                local ok, res = pcall(function()
+                    if radius then return cast_ray(from, to, layer, 0, radius, opt) end
+                    return cast_ray(from, to, layer, 0)
+                end)
+                if ok and res then
+                    for _, r in ipairs(res) do
+                        local q = r[2]
+                        if q and q.y <= from.y + 0.05 and (not best or q.y > best.y) and not skipped(r[1]) then
+                            best = Vector3f.new(q.x, q.y, q.z)
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return best
+end
+
+-- the nearest real surface along a line: thin rays on every ground layer first (cheap), one sphere cast on the
+-- open-world layer only if they find nothing
+local function first_hit(from, to)
+    local best, bestD
+    for pass = 1, 2 do
+        if best then break end
+        for _, layer in ipairs(pass == 1 and GROUND_LAYERS or { 2 }) do
+            local ok, res = pcall(function()
+                if pass == 2 then return cast_ray(from, to, layer, 0, 0.15, 1) end
+                return cast_ray(from, to, layer, 0)
+            end)
+            if ok and res then
+                for _, r in ipairs(res) do
+                    local q = r[2]
+                    if q and not skipped(r[1]) then
+                        local d = (q.x - from.x) ^ 2 + (q.y - from.y) ^ 2 + (q.z - from.z) ^ 2
+                        if d > 0.04 and (not bestD or d < bestD) then best, bestD = Vector3f.new(q.x, q.y, q.z), d end
+                    end
+                end
+            end
+        end
+    end
+    return best, bestD and math.sqrt(bestD)
+end
+
+------------------------------------------------------------------------
+-- the spell
+------------------------------------------------------------------------
+-- state: nil | "aiming" { b = beam, ... } | "door" { dest, rot, center, nx, nz, side, untilT, air, airDoor }
+local state, s = nil, nil
+local cast_cancel, open_door -- defined further down
+
+local function cancel(why)
+    if cast_cancel then cast_cancel() end
+    finish_door(s)
+    state, s = nil, nil
+    event(why)
+end
+
+-- where the beam goes now: from the eyes toward what the camera centre points at
+local function beam_now(p)
+    local m = sdk.get_primary_camera():get_WorldMatrix()
+    local cpos = Vector3f.new(m[3].x, m[3].y, m[3].z)
+    local fx, fy, fz = -m[2].x, -m[2].y, -m[2].z
+    local pos = transform_of(p):get_Position()
+    local eye = Vector3f.new(pos.x, pos.y + EYE_HEIGHT, pos.z)
+    local maxd = config.max_ft * FT
+    -- aim point: the camera ray, started level with the character (not from behind it)
+    local t0 = math.max(0, (eye.x - cpos.x) * fx + (eye.y - cpos.y) * fy + (eye.z - cpos.z) * fz)
+    local a = Vector3f.new(cpos.x + fx * t0, cpos.y + fy * t0, cpos.z + fz * t0)
+    local far = Vector3f.new(a.x + fx * maxd, a.y + fy * maxd, a.z + fz * maxd)
+    local aim = first_hit(a, far) or far
+    local dx, dy, dz = aim.x - eye.x, aim.y - eye.y, aim.z - eye.z
+    local len = math.sqrt(dx * dx + dy * dy + dz * dz)
+    if len < 0.01 then return nil end
+    dx, dy, dz = dx / len, dy / len, dz / len
+    local endp = Vector3f.new(eye.x + dx * maxd, eye.y + dy * maxd, eye.z + dz * maxd)
+    local hit, hd = first_hit(eye, endp)
+    return { eye = eye, dx = dx, dy = dy, dz = dz, endp = hit or endp, hit = hit ~= nil, dist = hit and hd or maxd }
+end
+
+-- the landing spot: just short of what the beam hit, onto the ground if there is ground right below, otherwise
+-- in the air (you fall). Under the map (nothing below, solid ground above) -> up onto that surface; nothing below
+-- for 400 m -> nil (the spell fizzles).
+local function landing(b)
+    local back = b.hit and 0.6 or 0
+    local dest = Vector3f.new(b.endp.x - b.dx * back, b.endp.y - b.dy * back, b.endp.z - b.dz * back)
+    local g = ground_near(dest.x, dest.y, dest.z, 0.8, 2.0)
+    if g then return g, false end
+    local top = ground_near(dest.x, dest.y + 80, dest.z, 0.0, 79.0)
+    local below = ground_near(dest.x, dest.y, dest.z, 0.0, 400.0)
+    if not below and top then
+        event(string.format("landing was under the map (surface %.1f m above) - moved up onto it", top.y - dest.y))
+        return top, false
+    end
+    if not below then return nil, "nothing below for 400 m" end
+    return dest, true
+end
+
+------------------------------------------------------------------------
+-- casting animation: the Mage's shared spell-casting set from the staff motlist ch00_006_atk - 700
+-- attackspelling_start (60 f) -> 701 attackspelling_chant1 (230 f, looped) while aiming, 750
+-- spellstock_release_A1 (45 f) when the target is locked. The motlist is added to the player as a dynamic motion
+-- bank; the player's animation state machine (MotionFsm2) is paused while casting so it can't switch the motion
+-- away. Movement is locked while aiming (the camera stays free).
+------------------------------------------------------------------------
+local CAST_BANK, CAST_PATH = 9112, "animation/ch/ch00/motlist/ch00_006_atk.motlist"
+local CAST = { start = { id = 700, len = 60 }, loop = { id = 701, len = 230 }, release = { id = 750, len = 45 } }
+local CHANGE = "changeMotion(System.UInt32, System.UInt32, System.Single, System.Single, via.motion.InterpolationMode, via.motion.InterpolationCurve)"
+local cast -- { phase = "start" | "loop" | "release", t, prev = {bank, id} }
+local aimLock = false -- movement + buttons zeroed (camera stick left alone) while casting
+local castInfo, nextBankTry = "not loaded yet", 0
+
+local function cast_bank_ready(p)
+    local info = sdk.create_instance("via.motion.MotionInfo", true)
+    return p:get_Motion():call("getMotionInfo(System.UInt32, System.UInt32, via.motion.MotionInfo)", CAST_BANK, CAST.loop.id, info)
+end
+
+-- added once, and again if the game rebuilt the player's motion (e.g. on equipment changes)
+local function ensure_cast_bank(p)
+    local mo = p:get_Motion()
+    for i = 0, mo:getDynamicMotionBankCount() - 1 do
+        local b = mo:getDynamicMotionBank(i)
+        if b and b:get_BankID() == CAST_BANK then return end
+    end
+    local holder = sdk.create_resource("via.motion.MotionListResource", CAST_PATH):add_ref()
+        :create_holder("via.motion.MotionListResourceHolder"):add_ref()
+    local n = mo:getDynamicMotionBankCount()
+    mo:setDynamicMotionBankCount(n + 1)
+    local bank = sdk.create_instance("via.motion.DynamicMotionBank"):add_ref()
+    bank:set_MotionList(holder)
+    bank:set_OverwriteBankID(true)
+    bank:set_BankID(CAST_BANK)
+    mo:setDynamicMotionBank(n, bank)
+    castInfo = "loading"
+end
+
+local fsmPaused
+local function pause_fsm(p, on)
+    pcall(function()
+        if on then
+            local fsm = p:get_GameObject():call("getComponent(System.Type)", sdk.typeof("via.motion.MotionFsm2"))
+            if fsm then fsm:call("set_Paused", true); fsmPaused = fsm:add_ref() end
+        elseif fsmPaused then
+            fsmPaused:call("set_Paused", false)
+            fsmPaused = nil
+        end
+    end)
+end
+
+local function cast_play(p, m, interp)
+    p:get_Motion():getLayer(0):call(CHANGE, CAST_BANK, m.id, 0.0, interp or 10.0, 1, 1)
+end
+
+local function cast_begin(p)
+    if not config.cast_anim then return end
+    local ok, err = pcall(function()
+        ensure_cast_bank(p)
+        if not cast_bank_ready(p) then castInfo = "animations still loading - retrying"; return end
+        local l = p:get_Motion():getLayer(0)
+        cast = { phase = "start", t = os.clock(), prev = { l:get_MotionBankID(), l:get_MotionID() } }
+        aimLock = true
+        cast_play(p, CAST.start, 8.0)
+        pause_fsm(p, true)
+        castInfo = "casting"
+    end)
+    if not ok then castInfo = "error: " .. tostring(err); event("casting animation: " .. castInfo); cast, aimLock = nil, false end
+end
+
+-- back to whatever was playing before (idle), animation logic and movement back
+local function cast_end(p)
+    if not cast then return end
+    pcall(function() p:get_Motion():getLayer(0):call(CHANGE, cast.prev[1], cast.prev[2], 0.0, 12.0, 1, 1) end)
+    pause_fsm(p, false)
+    cast, aimLock, castInfo = nil, false, "idle"
+end
+
+local function cast_release(p)
+    if not cast then return end
+    pcall(cast_play, p, CAST.release, 6.0)
+    cast.phase, cast.t = "release", os.clock()
+    aimLock = false
+end
+
+local function face_camera(p)
+    local dx, dz = camera_forward()
+    if not dx then return end
+    local yaw = math.atan(dx, dz)
+    pcall(function()
+        local tac = p["<TargetAngleCtrl>k__BackingField"]
+        tac.Front["<AngleDeg>k__BackingField"] = math.deg(yaw)
+        tac.Move["<AngleDeg>k__BackingField"] = math.deg(yaw)
+    end)
+    transform_of(p):set_Rotation(yaw_rotation(dx, dz))
+end
+
+-- every update while casting: keep our motion on layer 0, start -> loop, loop the chant, end after the release
+local function cast_update(p)
+    if not cast then return end
+    local ok, err = pcall(function()
+        local l = p:get_Motion():getLayer(0)
+        local bank, id, f = l:get_MotionBankID(), l:get_MotionID(), l:get_Frame()
+        local m = CAST[cast.phase]
+        if cast.phase == "release" then
+            if bank ~= CAST_BANK or id ~= m.id or f >= m.len - 1 or os.clock() - cast.t > 2.0 then
+                pause_fsm(p, false)
+                cast, castInfo = nil, "idle"
+            end
+            return
+        end
+        face_camera(p)
+        if bank ~= CAST_BANK or id ~= m.id then
+            if cast.phase == "start" and os.clock() - cast.t > 1.8 then cast.phase, m = "loop", CAST.loop end
+            cast_play(p, m, 6.0)
+        elseif f >= m.len - 2 then
+            cast.phase = "loop"
+            cast_play(p, CAST.loop, 10.0)
+        end
+    end)
+    if not ok then event("casting animation error: " .. tostring(err)); cast_end(p) end
+end
+
+cast_cancel = function()
+    local p = player()
+    if p and cast and cast.phase ~= "release" then cast_end(p) end
+end
+
+local function start(p)
+    if not cast_ray then event("needs _ScriptCore (_SharedCore) - not found"); return end
+    state = "aiming"
+    s = { nextCast = 0, nextFx = 0, nextCastTry = os.clock() + 0.25 }
+    cast_begin(p)
+    play_sound(p, OPEN_SOUND)
+    event("casting")
+end
+
+-- while aiming: beam every 0.15 s, sparks at the target every 0.3 s; the cast retries if its animations weren't
+-- ready at the key press
+local function aim_update(p)
+    local now = os.clock()
+    if config.cast_anim and not cast and now >= s.nextCastTry then
+        s.nextCastTry = now + 0.25
+        cast_begin(p)
+    end
+    if now >= s.nextCast then
+        s.nextCast = now + 0.15
+        local ok, b = pcall(beam_now, p)
+        if ok and b then s.b = b elseif not ok then event("beam error: " .. tostring(b)) end
+    end
+    if s.b and now >= s.nextFx then
+        s.nextFx = now + 0.3
+        local b, back = s.b, s.b.hit and 0.5 or 0 -- a little in front of what the beam hit
+        local sp = Vector3f.new(b.endp.x - b.dx * back, b.endp.y - b.dy * back, b.endp.z - b.dz * back)
+        play_efx(p, SPARK_EFX, sp, nil, 0.6)
+        play_efx(p, BURST_EFX, sp, nil, 0.6)
+    end
+end
+
+local function lock_beam(p)
+    local b = s.b
+    if not b then cancel("no target yet - spell fizzled"); return end
+    local dest, air = landing(b)
+    if not dest then cancel("unsafe destination (" .. tostring(air) .. ") - spell fizzled"); return end
+    local dx, dz = flat_dir(b.dx, b.dz)
+    if not dx then dx, dz = flat_dir(forward_of(transform_of(p):get_Rotation())) end
+    s.good = { pos = dest, dist = b.dist, air = air }
+    s.dx, s.dz = dx, dz
+    event(string.format("target locked: %.0f ft%s", b.dist / FT, air and " (in the air)" or ""))
+    cast_release(p)
+    open_door(p)
+end
+
+-- the door: right next to you toward where the camera looks, at your feet height (snapped to ground within half
+-- a metre, otherwise floating)
+open_door = function(p)
+    local pos = transform_of(p):get_Position()
+    local dx, dz = camera_forward()
+    dx, dz = dx or s.dx, dz or s.dz
+    local center = Vector3f.new(pos.x + dx * DOOR_DISTANCE, pos.y, pos.z + dz * DOOR_DISTANCE)
+    local g = ground_near(center.x, pos.y, center.z, 0.5, 0.5)
+    if g then center = g end
+    state = "door"
+    s = { dest = s.good.pos, rot = yaw_rotation(s.dx, s.dz), center = center, nx = dx, nz = dz, side = nil,
+        untilT = os.clock() + config.door_time, dist = s.good.dist, air = s.good.air, airDoor = not g }
+    play_sound(p, OPEN_SOUND)
+    event(string.format("door opened, destination %.0f ft away", s.dist / FT))
+end
+
+-- the door's look: the frost shimmer along the frame, spawned once (it loops); Fangtooth sparks if there's no
+-- weapon to borrow the shimmer from
+local function draw_door(p, d)
+    local c0, w, h = d.center, DOOR_WIDTH / 2, DOOR_HEIGHT
+    local c = Vector3f.new(c0.x, c0.y + config.door_offset, c0.z)
+    local rx, rz = -d.nz, d.nx
+    local rot = yaw_rotation(d.nx, d.nz)
+    if not d.fx and not d.noShimmer then
+        d.fx, d.gos = {}, {}
+        local per = h * 2 + w * 2
+        for i = 0, DOOR_POINTS - 1 do -- up the right side, across the top, down the left side
+            local u = (i + 0.5) / DOOR_POINTS * per
+            local sx, y
+            if u < h then sx, y = w, u
+            elseif u < h + 2 * w then sx, y = w - (u - h), h
+            else sx, y = -w, h - (u - h - 2 * w) end
+            local ok, go = pcall(make_anchor, "DimensionDoor_door", Vector3f.new(c.x + rx * sx, c.y + y, c.z + rz * sx), rot)
+            if ok and go then
+                d.gos[#d.gos + 1] = go
+                local fx = shimmer_on(p, go)
+                if fx then d.fx[#d.fx + 1] = fx end
+            end
+        end
+        if #d.fx == 0 then finish_door(d); d.noShimmer = true end
+        return
+    end
+    if not d.noShimmer then return end
+    local now = os.clock()
+    if now < (d.nextFx or 0) then return end
+    d.nextFx = now + 0.8
+    for i = 0, 4 do
+        local y = c.y + h * i / 4
+        play_efx(p, DOOR_EFX, Vector3f.new(c.x + rx * w, y, c.z + rz * w), rot, 1.0)
+        play_efx(p, DOOR_EFX, Vector3f.new(c.x - rx * w, y, c.z - rz * w), rot, 1.0)
+    end
+    for i = -1, 1 do
+        play_efx(p, DOOR_EFX, Vector3f.new(c.x + rx * w * i * 0.5, c.y + h, c.z + rz * w * i * 0.5), rot, 1.0)
+    end
+end
+
+------------------------------------------------------------------------
+-- teleport: app.Character.warp with CharacterWarpOption.ResetPosRotContext (the game's own instant warp; setting
+-- the transform is undone by the character's position history), done during the game's input processing and
+-- held for 8 frames. Afterwards the cameras are told about the warp (they don't follow long jumps otherwise).
+------------------------------------------------------------------------
+local function place(chara, dest, rot)
+    local ok = pcall(function()
+        local opt = sdk.find_type_definition("app.CharacterWarpOption"):get_field("ResetPosRotContext"):get_data(nil)
+        chara:call("warp(via.vec3, via.Quaternion, app.CharacterWarpOption)", dest, rot, opt)
+    end)
+    if ok then return end
+    local tr = transform_of(chara)
+    tr:set_Position(dest)
+    tr:set_Rotation(rot)
+    pcall(function() chara["<CharaController>k__BackingField"]:call("warp") end)
+end
+
+local function tell_cameras()
+    pcall(function() sdk.get_managed_singleton("app.CameraManager"):call("setCurrentCameraReset(app.CameraDefine.ResetOption)", 6) end)
+    pcall(function()
+        local sm = sdk.get_native_singleton("via.SceneManager")
+        local scn = sdk.call_native_func(sm, sdk.find_type_definition("via.SceneManager"), "get_CurrentScene")
+        local list = scn:call("findComponents(System.Type)", sdk.typeof("app.CameraControllerBase"))
+        for i = 0, list:get_size() - 1 do
+            pcall(function()
+                local cc = list:get_element(i)
+                cc.IsFirstProcAfterWarp = true
+                cc:call("onWarpTarget()")
+            end)
+        end
+    end)
+end
+
+local scene -- the arrival scene, see start_scene
+local camOverride -- { pos, rot } written over the game camera while set
+local gamePose -- the game camera's own pose this frame { pos, rot }
+local walkStick -- { x, y } injected into the player's left stick while set
+local pendingPlace -- { chara, dest, rot, frames, first }: done inside the input hook
+local inputLocked = false -- while set, the player's buttons and sticks are zeroed every frame
+
+local function quat(w, x, y, z) return Quaternion.new(w, x, y, z) end
+local function qmul(a, b)
+    return quat(a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+        a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+        a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+        a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w)
+end
+local function qlerp(a, b, t) -- normalised lerp, shortest way
+    local d = a.w * b.w + a.x * b.x + a.y * b.y + a.z * b.z
+    local sgn = d < 0 and -1 or 1
+    local w, x, y, z = a.w + (b.w * sgn - a.w) * t, a.x + (b.x * sgn - a.x) * t, a.y + (b.y * sgn - a.y) * t, a.z + (b.z * sgn - a.z) * t
+    local n = math.sqrt(w * w + x * x + y * y + z * z)
+    return quat(w / n, x / n, y / n, z / n)
+end
+local function vlerp(a, b, t) return Vector3f.new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t) end
+local function ease(t) t = math.max(0, math.min(1, t)) return t * t * (3 - 2 * t) end
+
+-- a camera rotation looking from `from` at `to` (RE Engine cameras look down -Z)
+local function look_rot(from, to)
+    local vx, vy, vz = to.x - from.x, to.y - from.y, to.z - from.z
+    local len = math.sqrt(vx * vx + vy * vy + vz * vz)
+    local fx, fz = flat_dir(vx, vz)
+    if not fx then fx, fz = 0, 1 end
+    local pitch = math.asin(vy / len)
+    return qmul(yaw_rotation(-fx, -fz), quat(math.cos(pitch / 2), math.sin(pitch / 2), 0, 0))
+end
+
+-- camera: right after MainCameraController.lateUpdate, note the game's own pose and write ours to the camera
+-- joint - the very thing the game writes every frame, so its next write takes over again when we stop
+local mainCam
+pcall(function()
+    sdk.hook(sdk.find_type_definition("app.MainCameraController"):get_method("lateUpdate"), function(args)
+        mainCam = nil
+        pcall(function()
+            local mc = sdk.to_managed_object(args[2])
+            if mc._Role == 0 then mainCam = mc end
+        end)
+    end, function(ret)
+        if mainCam then
+            pcall(function() gamePose = { pos = mainCam._Position, rot = mainCam._Rotation } end)
+            if camOverride then
+                pcall(function()
+                    local j = mainCam._CameraJoint
+                    j:set_Position(camOverride.pos)
+                    j:set_Rotation(camOverride.rot)
+                end)
+            end
+        end
+        return ret
+    end)
+end)
+
+-- walk-out: left-stick values for a world direction, relative to the game's own camera
+local function stick_for(dx, dz, strength)
+    local q = gamePose and gamePose.rot or sdk.get_primary_camera():get_GameObject():get_Transform():get_Rotation()
+    local fx, fz = flat_dir(-(2 * (q.x * q.z + q.w * q.y)), -(1 - 2 * (q.x * q.x + q.y * q.y))) -- camera forward
+    local rx, rz = flat_dir(1 - 2 * (q.y * q.y + q.z * q.z), 2 * (q.x * q.z - q.w * q.y))       -- camera right
+    if not fx or not rx then return 0, strength end
+    return (dx * rx + dz * rz) * strength, (dx * fx + dz * fz) * strength
+end
+
+------------------------------------------------------------------------
+-- gamepad: raw buttons from via.hid.GamePad (LUp 1, LDown 2, LLeft 4, LRight 8, L1 256, R1 1024). In the
+-- player's own input, right after the game filled it: a d-pad press without L1/R1 teaches us which action bits
+-- that direction sets (the pawn commands); while L1 is held those bits are cleared, so the pawns get no command.
+------------------------------------------------------------------------
+local PAD_L1, PAD_R1 = 256, 1024
+local PAD_DIRS = { up = 1, down = 2, left = 4, right = 8 }
+local BTN_FIELDS = { "ButtonOnFlags", "ButtonTriggerFlags", "ButtonReleaseFlags", "ButtonRepeatFlags" }
+local padNow, padPrev = 0, 0
+local padComboPressed = false -- L1 + d-pad up pressed; picked up by the update step
+local gpGetMerged = sdk.find_type_definition("via.hid.GamePad"):get_method("get_MergedDevice")
+local function read_pad()
+    local ok, b = pcall(function()
+        local dev = gpGetMerged:call(nil)
+        return dev and dev:call("get_Button") or 0
+    end)
+    return ok and (b or 0) or 0
+end
+
+local function pad_filter(inp)
+    padPrev, padNow = padNow, read_pad()
+    local l1 = (padNow & PAD_L1) ~= 0
+    if l1 and (padNow & PAD_DIRS.up) ~= 0 and (padPrev & PAD_DIRS.up) == 0 then padComboPressed = true end
+    local trig = inp:get_field("ButtonTriggerFlags") or 0
+    for name, bit in pairs(PAD_DIRS) do
+        if (padNow & bit) ~= 0 and (padPrev & bit) == 0 and (padNow & (PAD_L1 | PAD_R1)) == 0 and trig ~= 0
+            and config.pad_bits[name] ~= trig then
+            config.pad_bits[name] = trig
+            save_config()
+        end
+    end
+    if l1 and (padNow & 15) ~= 0 then
+        local mask = 0
+        for name, bit in pairs(PAD_DIRS) do
+            if (padNow & bit) ~= 0 then mask = mask | (config.pad_bits[name] or 0) end
+        end
+        if mask ~= 0 then
+            for _, f in ipairs(BTN_FIELDS) do
+                pcall(function() inp:set_field(f, (inp:get_field(f) or 0) & ~mask) end)
+            end
+        end
+    end
+end
+
+-- the player's input, right after the game reads the devices: gamepad combo, teleport, input lock, walk-out
+local curInput
+pcall(function()
+    sdk.hook(sdk.find_type_definition("app.UserInputManager"):get_method("updateInput"), function(args)
+        curInput = (inputLocked or walkStick or pendingPlace or aimLock or config.pad_combo) and sdk.to_managed_object(args[3]) or nil
+    end, function(ret)
+        if curInput then
+            pcall(function()
+                local p = player()
+                local mine = p and p:get_Input()
+                if not (mine and curInput:get_address() == mine:get_address()) then return end
+                if config.pad_combo then pad_filter(curInput) end
+                if not (inputLocked or walkStick or pendingPlace or aimLock) then return end
+                if pendingPlace then
+                    local q = transform_of(pendingPlace.chara):get_Position()
+                    local dx, dy, dz = q.x - pendingPlace.dest.x, q.y - pendingPlace.dest.y, q.z - pendingPlace.dest.z
+                    if pendingPlace.first or dx * dx + dy * dy + dz * dz > 0.25 then
+                        place(pendingPlace.chara, pendingPlace.dest, pendingPlace.rot)
+                        pendingPlace.first = false
+                    end
+                    pendingPlace.frames = pendingPlace.frames - 1
+                    if pendingPlace.frames <= 0 then
+                        tell_cameras()
+                        pendingPlace = nil
+                    end
+                end
+                for _, f in ipairs(BTN_FIELDS) do pcall(function() curInput:set_field(f, 0) end) end
+                if inputLocked or walkStick then -- while aiming the camera stays yours
+                    pcall(function() curInput:call("setAxisR(System.Single, System.Single)", 0.0, 0.0) end)
+                end
+                local x, y = 0.0, 0.0
+                if walkStick then x, y = walkStick.x, walkStick.y end
+                curInput:call("setAxisL(System.Single, System.Single)", x, y)
+            end)
+        end
+        return ret
+    end)
+end)
+
+local function teleport(p, dest, rot)
+    pendingPlace = { chara = p, dest = dest, rot = rot, frames = 8, first = true }
+end
+
+------------------------------------------------------------------------
+-- the arrival scene: controls locked; the camera flies to the side of the arrival door and swings round to its
+-- front; the character appears behind the door (facing back toward where you cast from - that side is open, the
+-- beam just flew through it) and walks out toward the camera; the camera swings round behind the character onto
+-- the game's own camera and hands over.
+------------------------------------------------------------------------
+local SHOT_R, SHOT_H = 5.5, 0.8
+-- camera on a circle around a pivot: theta 0 = in front (along fx, fz), pi/2 = right side, pi = behind
+local function orbit_pose(pivot, fx, fz, theta, radius, height)
+    local rx, rz = fz, -fx
+    local cx = math.cos(theta) * fx + math.sin(theta) * rx
+    local cz = math.cos(theta) * fz + math.sin(theta) * rz
+    local pos = Vector3f.new(pivot.x + cx * radius, pivot.y + height, pivot.z + cz * radius)
+    return pos, look_rot(pos, pivot)
+end
+
+local function end_scene(why)
+    if not scene then return end
+    finish_door(scene.door)
+    camOverride, walkStick, inputLocked = nil, nil, false
+    pcall(function() sdk.get_managed_singleton("app.CameraManager"):call("setCurrentCameraReset(app.CameraDefine.ResetOption)", 6) end)
+    if why ~= "done" then event("arrival scene ended: " .. why) end
+    scene = nil
+end
+
+local function start_scene(p, dest, dist, dx, dz, air)
+    dx, dz = -dx, -dz
+    local doorC = Vector3f.new(dest.x + dx * 0.6, dest.y, dest.z + dz * 0.6)
+    if not air then doorC = ground_near(doorC.x, dest.y, doorC.z, 1.0, 2.0) or doorC end
+    local pivot = Vector3f.new(doorC.x, doorC.y + 1.1, doorC.z)
+    local shot, shotRot = orbit_pose(pivot, dx, dz, 0, SHOT_R, SHOT_H)
+    local side, sideRot = orbit_pose(pivot, dx, dz, math.pi / 2, SHOT_R, SHOT_H)
+    local tr = sdk.get_primary_camera():get_GameObject():get_Transform()
+    local cam = gamePose or { pos = tr:get_Position(), rot = tr:get_Rotation() }
+    scene = { phase = "fly", t0 = os.clock(), started = os.clock(), from = cam, shot = shot, shotRot = shotRot,
+        side = side, sideRot = sideRot, pivot = pivot, start = dest, door = { center = doorC, nx = dx, nz = dz },
+        rot = yaw_rotation(dx, dz), dx = dx, dz = dz, hop = math.min(30.0, dist * 0.25), air = air }
+    inputLocked = true
+    camOverride = { pos = cam.pos, rot = cam.rot }
+    event(string.format("stepped through: %.0f ft", dist / FT))
+end
+
+local function run_scene(p)
+    local sc, now = scene, os.clock()
+    local t = now - sc.t0
+    if sc.phase == "fly" then
+        local k = ease(t / config.fly_time)
+        local pos = vlerp(sc.from.pos, sc.side, k)
+        pos = Vector3f.new(pos.x, pos.y + math.sin(math.pi * k) * sc.hop, pos.z) -- arc over the terrain
+        camOverride = { pos = pos, rot = qlerp(sc.from.rot, sc.sideRot, k) }
+        if t >= config.fly_time then sc.phase, sc.t0 = "open", now; play_sound(p, OPEN_SOUND) end
+    elseif sc.phase == "open" then
+        -- swing from the side to the front while the door opens
+        local k = ease(t / 0.9)
+        local pos, rot = orbit_pose(sc.pivot, sc.dx, sc.dz, (1 - k) * math.pi / 2, SHOT_R, SHOT_H)
+        camOverride = { pos = pos, rot = rot }
+        draw_door(p, sc.door)
+        if t >= 0.9 then
+            teleport(p, sc.start, sc.rot)
+            for _, ids in ipairs(ARRIVE_EFX) do play_efx(p, ids, sc.door.center, sc.rot, 1.0) end
+            play_sound(p, ARRIVE_SOUND)
+            sc.phase, sc.t0 = "walk", now
+        end
+    elseif sc.phase == "walk" then
+        camOverride = { pos = sc.shot, rot = sc.shotRot }
+        draw_door(p, sc.door)
+        local pos = transform_of(p):get_Position()
+        local past = (pos.x - sc.door.center.x) * sc.dx + (pos.z - sc.door.center.z) * sc.dz
+        local far = math.abs(pos.x - sc.start.x) + math.abs(pos.z - sc.start.z) > 6.0
+        if far and t < 8.0 then return end -- not there yet
+        if far then end_scene("the teleport never arrived"); return end
+        if not sc.arrived then sc.arrived, sc.t0, t = true, now, 0 end
+        if sc.air then -- arrived in the air: no walk, you fall
+            if t > 0.3 then sc.phase, sc.t0 = "turn", now end
+            return
+        end
+        if t > 0.25 then
+            local x, y = stick_for(sc.dx, sc.dz, WALK_STRENGTH)
+            if sc.flipped then x, y = -x, -y end
+            walkStick = { x = x, y = y }
+            -- self-check: if we're moving away from the door, turn the stick round
+            sc.walkFrom = sc.walkFrom or past
+            if not sc.checked and t > 0.75 then
+                sc.checked = true
+                if past < sc.walkFrom - 0.3 then sc.flipped = true end
+            end
+        end
+        if past >= 0.5 or t > WALK_TIMEOUT then
+            walkStick = nil
+            sc.phase, sc.t0 = "turn", now
+        end
+    elseif sc.phase == "turn" then
+        -- swing from the front round to behind the character, ending on the game's own camera
+        local k = ease(t / TURN_TIME)
+        local q = transform_of(p):get_Position()
+        local pp = Vector3f.new(q.x, q.y + 1.1, q.z)
+        local pivot = vlerp(sc.pivot, pp, k)
+        local th1, r1, h1 = math.pi, 3.5, 0.6
+        if gamePose then
+            local vx, vy, vz = gamePose.pos.x - pp.x, gamePose.pos.y - pp.y, gamePose.pos.z - pp.z
+            local rx, rz = sc.dz, -sc.dx
+            th1 = math.atan(vx * rx + vz * rz, vx * sc.dx + vz * sc.dz)
+            if th1 < 0 then th1 = th1 + 2 * math.pi end -- round via the right side
+            r1, h1 = math.sqrt(vx * vx + vz * vz), vy
+        end
+        local pos, rot = orbit_pose(pivot, sc.dx, sc.dz, th1 * k, SHOT_R + (r1 - SHOT_R) * k, SHOT_H + (h1 - SHOT_H) * k)
+        if gamePose then rot = qlerp(rot, gamePose.rot, k * k) end
+        camOverride = { pos = pos, rot = rot }
+        if t >= TURN_TIME then end_scene("done") end
+    end
+    if scene and now - scene.started > 20 then end_scene("watchdog timeout") end
+end
+
+-- walking through the door: crossing its plane forwards, within its width (more height tolerance in the air)
+local function step_through(p)
+    local pos = transform_of(p):get_Position()
+    local vx, vz = pos.x - s.center.x, pos.z - s.center.z
+    local side = vx * s.nx + vz * s.nz
+    local across = math.abs(vx * -s.nz + vz * s.nx)
+    local was = s.side
+    s.side = side
+    if was and was < 0 and side >= 0 and across <= DOOR_WIDTH / 2 + 0.3 and math.abs(pos.y - s.center.y) < (s.airDoor and 4.0 or 2.0) then
+        local dest, rot, dist, air = s.dest, s.rot, s.dist, s.air
+        local fx, fz = forward_of(rot)
+        finish_door(s)
+        state, s = nil, nil
+        if config.cutscene then
+            start_scene(p, dest, dist, fx, fz, air)
+            return
+        end
+        teleport(p, dest, rot)
+        for _, ids in ipairs(ARRIVE_EFX) do play_efx(p, ids, dest, rot, 1.0) end
+        play_sound(p, ARRIVE_SOUND)
+        event(string.format("stepped through: %.0f ft", dist / FT))
+    end
+end
+
+local keyWasDown = false
+
+-- everything that moves things or spawns effects runs here (in the game's update step)
+re.on_pre_application_entry("UpdateBehavior", function()
+    local ok, err = pcall(function()
+        local p = player()
+        if not p or not config.enabled then
+            if state then cancel("cancelled") end
+            end_scene("disabled / no player")
+            return
+        end
+
+        local down = reframework:is_key_down(config.key)
+        local pressed = down and not keyWasDown
+        keyWasDown = down
+        if padComboPressed then padComboPressed = false; if config.pad_combo then pressed = true end end
+
+        if config.cast_anim and not cast and os.clock() >= nextBankTry then
+            nextBankTry = os.clock() + 5.0
+            pcall(ensure_cast_bank, p) -- preloaded, so the first cast has its animations ready
+        end
+        cast_update(p)
+
+        if scene then run_scene(p); return end
+
+        if state == nil then
+            if pressed then start(p) end
+        elseif state == "aiming" then
+            if pressed then lock_beam(p); return end
+            aim_update(p)
+        elseif state == "door" then
+            if pressed then cancel("door closed"); return end
+            if os.clock() > s.untilT then cancel("door faded"); return end
+            draw_door(p, s)
+            step_through(p)
+        end
+    end)
+    if not ok then event("error: " .. tostring(err)); state, s = nil, nil; end_scene("error") end
+end)
+
+re.on_script_reset(function()
+    pcall(function() local p = player(); if p then cast_end(p) end end)
+    pause_fsm(nil, false)
+    aimLock = false
+    finish_door(s)
+    if scene then finish_door(scene.door) end
+    pendingPlace = nil
+    end_scene("script reset")
+    for _, e in ipairs(liveEfx) do pcall(finish_effect, e.container) end
+end)
+
+------------------------------------------------------------------------
+-- UI
+------------------------------------------------------------------------
+local KEY_NAMES = {}
+for c = 0x41, 0x5A do KEY_NAMES[c] = string.char(c) end
+for n = 1, 12 do KEY_NAMES[0x6F + n] = "F" .. n end
+local waitingKey = false
+
+re.on_draw_ui(function()
+    if not imgui.tree_node("Dimension Door v" .. VERSION) then return end
+    local changed, c = false, false
+    c, config.enabled = imgui.checkbox("Enabled", config.enabled); changed = changed or c
+    if waitingKey then
+        imgui.text("Press a letter or F-key...")
+        for code, _ in pairs(KEY_NAMES) do
+            if reframework:is_key_down(code) then config.key = code; waitingKey = false; changed = true; keyWasDown = true end
+        end
+    elseif imgui.button("Key: " .. (KEY_NAMES[config.key] or tostring(config.key)) .. " (click to change)") then
+        waitingKey = true
+    end
+    c, config.pad_combo = imgui.checkbox("Gamepad: hold L1 + d-pad up", config.pad_combo); changed = changed or c
+    if config.pad_combo then
+        local learned = {}
+        for _, n in ipairs({ "up", "down", "left", "right" }) do
+            if config.pad_bits[n] then learned[#learned + 1] = n end
+        end
+        imgui.text("  Pawn commands blocked while L1 is held: " .. (#learned > 0 and table.concat(learned, ", ")
+            or "none learned yet - give each d-pad command once without L1"))
+    end
+    c, config.max_ft = imgui.slider_int("Max range (ft)", config.max_ft, 30, 1000); changed = changed or c
+    c, config.door_time = imgui.slider_int("Door stays open (s)", config.door_time, 5, 300); changed = changed or c
+    c, config.door_offset = imgui.slider_float("Door height offset (m)", config.door_offset, -2.0, 2.0, "%.1f"); changed = changed or c
+    c, config.cast_anim = imgui.checkbox("Casting animation while aiming", config.cast_anim); changed = changed or c
+    c, config.cutscene = imgui.checkbox("Arrival scene (camera flies, you walk out)", config.cutscene); changed = changed or c
+    if config.cutscene then
+        c, config.fly_time = imgui.slider_float("Camera flight (s)", config.fly_time, 0.3, 5.0, "%.1f"); changed = changed or c
+    end
+    c, config.sounds = imgui.checkbox("Sounds", config.sounds); changed = changed or c
+    if imgui.button("Default") then
+        local learned = config.pad_bits
+        for k, v in pairs(DEFAULTS) do config[k] = copy(v) end
+        config.pad_bits = learned -- keep what was learned about the d-pad
+        changed = true
+    end
+    local st = "ready"
+    if state == "aiming" then st = s.b and string.format("aiming, %.0f ft%s", s.b.dist / FT, s.b.hit and "" or " (open air)") or "aiming"
+    elseif state == "door" then st = string.format("door open, %.0f ft, %ds left", s.dist / FT, math.floor(s.untilT - os.clock())) end
+    if scene then st = "arriving" end
+    imgui.text("Now: " .. st .. (cast_ray and "" or "   - _ScriptCore (_SharedCore) MISSING, the spell can't work"))
+    imgui.text("Last: " .. lastMsg)
+    if changed then save_config() end
+    imgui.tree_pop()
+end)
