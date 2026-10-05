@@ -1,4 +1,4 @@
--- Dimension Door (D&D style) - Dragon's Dogma 2 (REFramework script) v0.7.7
+-- Dimension Door (D&D style) - Dragon's Dogma 2 (REFramework script) v0.8.0
 -- Press B (keyboard) or hold L1 + d-pad up (gamepad): your character starts casting (Mage casting animation) and
 -- a beam goes from your eyes to where the camera aims, up to 500 ft; it stops at the first thing it hits (or
 -- ends in the air). Sparks mark the spot. Press again: the spot is locked and a door of frost shimmer opens next
@@ -8,7 +8,7 @@
 -- Needs _ScriptCore (autorun/_SharedCore) for the ground checks.
 -- REFramework menu (Insert) > Script Generated UI > Dimension Door. Uninstall: delete this file.
 
-local VERSION = "0.7.7"
+local VERSION = "0.8.0"
 local CONFIG_FILE = "DimensionDoor.json"
 local LOG_FILE = "DimensionDoor_debug.json"
 local FT = 0.3048
@@ -192,6 +192,7 @@ end
 
 local function finish_door(d)
     if not d then return end
+    if d.remote then finish_door(d.remote) end
     for _, c in ipairs(d.fx or {}) do pcall(finish_effect, c) end
     for _, go in ipairs(d.gos or {}) do pcall(function() go:call("destroy(via.GameObject)", go) end) end
     d.fx, d.gos = nil, nil
@@ -260,12 +261,12 @@ local function ground_near(x, y, z, up, down)
     return best
 end
 
--- the nearest real surface along a line: thin rays on every ground layer first (cheap), one sphere cast on the
--- open-world layer only if they find nothing
+-- the nearest real surface along a line: thin rays on every ground layer (town ground answers these) AND one
+-- sphere cast on the open-world layer (terrain answers only spheres); the nearest hit wins. Both always run: with
+-- the sphere only as a fallback, a ray through a hill hit something behind it and the target ended up under the map.
 local function first_hit(from, to)
     local best, bestD
     for pass = 1, 2 do
-        if best then break end
         for _, layer in ipairs(pass == 1 and GROUND_LAYERS or { 2 }) do
             local ok, res = pcall(function()
                 if pass == 2 then return cast_ray(from, to, layer, 0, 0.15, 1) end
@@ -322,21 +323,47 @@ local function beam_now(p)
 end
 
 -- the landing spot: just short of what the beam hit, onto the ground if there is ground right below, otherwise
--- in the air (you fall). Under the map (nothing below, solid ground above) -> up onto that surface; nothing below
--- for 400 m -> nil (the spell fizzles).
+-- in the air (you fall). A mid-air spot with solid ground ABOVE it (within 80 m) is under something - usually
+-- under the map, where the aim slipped through ground the casts don't see - so it is moved up onto that surface.
+-- Nothing below for 400 m -> nil (the spell fizzles).
+-- v0.7.8: a landing on the ground must also be reachable: a clear line from the beam's own (open-air) path to the
+-- spot at chest height, and head room. Otherwise (e.g. the beam hit a rock's side and the ground found below was
+-- the terrain INSIDE the rock) we step back along the beam and try again.
+local BACK_STEPS = { 0.6, 1.5, 3.0, 5.0, 8.0 }
+local function reachable(from, g)
+    local chest = Vector3f.new(g.x, g.y + 1.0, g.z)
+    if first_hit(from, chest) then return false end
+    return not first_hit(Vector3f.new(g.x, g.y + 0.4, g.z), Vector3f.new(g.x, g.y + 1.9, g.z))
+end
+
 local function landing(b)
     local back = b.hit and 0.6 or 0
     local dest = Vector3f.new(b.endp.x - b.dx * back, b.endp.y - b.dy * back, b.endp.z - b.dz * back)
     local g = ground_near(dest.x, dest.y, dest.z, 0.8, 2.0)
-    if g then return g, false end
-    local top = ground_near(dest.x, dest.y + 80, dest.z, 0.0, 79.0)
-    local below = ground_near(dest.x, dest.y, dest.z, 0.0, 400.0)
-    if not below and top then
-        event(string.format("landing was under the map (surface %.1f m above) - moved up onto it", top.y - dest.y))
-        return top, false
+    if g and b.hit then
+        local tries = 0
+        for _, k in ipairs(BACK_STEPS) do
+            if k >= b.dist then break end
+            local bp = Vector3f.new(b.endp.x - b.dx * k, b.endp.y - b.dy * k, b.endp.z - b.dz * k)
+            local gk = ground_near(bp.x, bp.y, bp.z, 0.8, 2.0)
+            if gk and reachable(bp, gk) then
+                if tries > 0 then event(string.format("landing was enclosed (inside a rock?) - stepped back %.1f m", k)) end
+                return gk, false, gk.y
+            end
+            tries = tries + 1
+        end
+        event("no reachable landing near the target - spell fizzled")
+        return nil, "no reachable landing"
     end
+    if g then return g, false, g.y end
+    local top = ground_near(dest.x, dest.y + 80, dest.z, 0.0, 79.0)
+    if top then
+        event(string.format("landing was under a surface %.1f m above (under the map?) - moved up onto it", top.y - dest.y))
+        return top, false, top.y
+    end
+    local below = ground_near(dest.x, dest.y, dest.z, 0.0, 400.0)
     if not below then return nil, "nothing below for 400 m" end
-    return dest, true
+    return dest, true, below.y
 end
 
 ------------------------------------------------------------------------
@@ -501,13 +528,14 @@ end
 local function lock_beam(p)
     local b = s.b
     if not b then cancel("no target yet - spell fizzled"); return end
-    local dest, air = landing(b)
+    local dest, air, groundY = landing(b)
     if not dest then cancel("unsafe destination (" .. tostring(air) .. ") - spell fizzled"); return end
     local dx, dz = flat_dir(b.dx, b.dz)
     if not dx then dx, dz = flat_dir(forward_of(transform_of(p):get_Rotation())) end
-    s.good = { pos = dest, dist = b.dist, air = air }
+    s.good = { pos = dest, dist = b.dist, air = air, groundY = groundY }
     s.dx, s.dz = dx, dz
-    event(string.format("target locked: %.0f ft%s", b.dist / FT, air and " (in the air)" or ""))
+    event(string.format("target locked: %.0f ft, %s%s", b.dist / FT, b.hit and "hit a surface" or "open air",
+        air and " (landing in the air)" or ""))
     cast_release(p)
     open_door(p)
 end
@@ -521,9 +549,14 @@ open_door = function(p)
     local center = Vector3f.new(pos.x + dx * DOOR_DISTANCE, pos.y, pos.z + dz * DOOR_DISTANCE)
     local g = ground_near(center.x, pos.y, center.z, 0.5, 0.5)
     if g then center = g end
+    -- the far door (visual only): at the destination, facing back toward you - where the arrival scene's door is
+    local dest = s.good.pos
+    local remote = { center = Vector3f.new(dest.x - s.dx * 0.6, dest.y, dest.z - s.dz * 0.6), nx = -s.dx, nz = -s.dz }
+    if not s.good.air then remote.center = ground_near(remote.center.x, dest.y, remote.center.z, 1.0, 2.0) or remote.center end
     state = "door"
-    s = { dest = s.good.pos, rot = yaw_rotation(s.dx, s.dz), center = center, nx = dx, nz = dz, side = nil,
-        untilT = os.clock() + config.door_time, dist = s.good.dist, air = s.good.air, airDoor = not g }
+    s = { dest = dest, rot = yaw_rotation(s.dx, s.dz), center = center, nx = dx, nz = dz, side = nil,
+        untilT = os.clock() + config.door_time, dist = s.good.dist, air = s.good.air, airDoor = not g,
+        groundY = s.good.groundY, remote = remote }
     play_sound(p, OPEN_SOUND)
     event(string.format("door opened, destination %.0f ft away", s.dist / FT))
 end
@@ -714,10 +747,12 @@ local function pad_filter(inp)
 end
 
 -- the player's input, right after the game reads the devices: gamepad combo, teleport, input lock, walk-out
+local fallGuard -- { chara, groundY, untilT, saves }: see teleport
+local fallReset -- { chara, frames }: see teleport
 local curInput
 pcall(function()
     sdk.hook(sdk.find_type_definition("app.UserInputManager"):get_method("updateInput"), function(args)
-        curInput = (inputLocked or walkStick or pendingPlace or aimLock or config.pad_combo) and sdk.to_managed_object(args[3]) or nil
+        curInput = (inputLocked or walkStick or pendingPlace or aimLock or fallGuard or fallReset or config.pad_combo) and sdk.to_managed_object(args[3]) or nil
     end, function(ret)
         if curInput then
             pcall(function()
@@ -725,6 +760,30 @@ pcall(function()
                 local mine = p and p:get_Input()
                 if not (mine and curInput:get_address() == mine:get_address()) then return end
                 if config.pad_combo then pad_filter(curInput) end
+                if fallReset then
+                    -- no fall damage from the height you jumped into the door at: the character's fall tracking
+                    -- (app.FallInfoHolder: highest point in the air / base height) starts again at the arrival
+                    pcall(function()
+                        local up = transform_of(fallReset.chara):get_UniversalPosition()
+                        local fi = fallReset.chara["<FallInfo>k__BackingField"]
+                        fi:call("resetBaseHeight(via.Position)", up)
+                        fi:call("set_HighestPositionOnAir(via.Position)", up)
+                        fi:call("resetFallHeight()")
+                    end)
+                    fallReset.frames = fallReset.frames - 1
+                    if fallReset.frames <= 0 then fallReset = nil end
+                end
+                if fallGuard then
+                    local q = transform_of(fallGuard.chara):get_Position()
+                    if q.y < fallGuard.groundY - 0.6 then
+                        place(fallGuard.chara, Vector3f.new(q.x, fallGuard.groundY + 0.1, q.z), transform_of(fallGuard.chara):get_Rotation())
+                        fallGuard.saves = fallGuard.saves + 1
+                    end
+                    if os.clock() > fallGuard.untilT then
+                        if fallGuard.saves > 0 then event("fell through the ground after arriving - put back on top " .. fallGuard.saves .. "x") end
+                        fallGuard = nil
+                    end
+                end
                 if not (inputLocked or walkStick or pendingPlace or aimLock) then return end
                 if pendingPlace then
                     local q = transform_of(pendingPlace.chara):get_Position()
@@ -736,6 +795,10 @@ pcall(function()
                     pendingPlace.frames = pendingPlace.frames - 1
                     if pendingPlace.frames <= 0 then
                         tell_cameras()
+                        if pendingPlace.groundY then
+                            fallGuard = { chara = pendingPlace.chara, groundY = pendingPlace.groundY, untilT = os.clock() + 2.0, saves = 0 }
+                        end
+                        fallReset = { chara = pendingPlace.chara, frames = 12 }
                         pendingPlace = nil
                     end
                 end
@@ -752,8 +815,11 @@ pcall(function()
     end)
 end)
 
-local function teleport(p, dest, rot)
-    pendingPlace = { chara = p, dest = dest, rot = rot, frames = 8, first = true }
+-- fall guard (v0.7.8): after a long jump the ground's collision at the destination may not be loaded yet and the
+-- character falls through it (user: "head out of the ground, then fell inside the map"). For 2 s after the
+-- teleport, dropping more than 0.6 m below the ground the beam found puts the character back on top of it.
+local function teleport(p, dest, rot, groundY)
+    pendingPlace = { chara = p, dest = dest, rot = rot, frames = 8, first = true, groundY = groundY }
 end
 
 ------------------------------------------------------------------------
@@ -781,7 +847,7 @@ local function end_scene(why)
     scene = nil
 end
 
-local function start_scene(p, dest, dist, dx, dz, air)
+local function start_scene(p, dest, dist, dx, dz, air, groundY)
     dx, dz = -dx, -dz
     local doorC = Vector3f.new(dest.x + dx * 0.6, dest.y, dest.z + dz * 0.6)
     if not air then doorC = ground_near(doorC.x, dest.y, doorC.z, 1.0, 2.0) or doorC end
@@ -792,7 +858,7 @@ local function start_scene(p, dest, dist, dx, dz, air)
     local cam = gamePose or { pos = tr:get_Position(), rot = tr:get_Rotation() }
     scene = { phase = "fly", t0 = os.clock(), started = os.clock(), from = cam, shot = shot, shotRot = shotRot,
         side = side, sideRot = sideRot, pivot = pivot, start = dest, door = { center = doorC, nx = dx, nz = dz },
-        rot = yaw_rotation(dx, dz), dx = dx, dz = dz, hop = math.min(30.0, dist * 0.25), air = air }
+        rot = yaw_rotation(dx, dz), dx = dx, dz = dz, hop = math.min(30.0, dist * 0.25), air = air, groundY = groundY }
     inputLocked = true
     camOverride = { pos = cam.pos, rot = cam.rot }
     event(string.format("stepped through: %.0f ft", dist / FT))
@@ -814,7 +880,7 @@ local function run_scene(p)
         camOverride = { pos = pos, rot = rot }
         draw_door(p, sc.door)
         if t >= 0.9 then
-            teleport(p, sc.start, sc.rot)
+            teleport(p, sc.start, sc.rot, sc.groundY)
             for _, ids in ipairs(ARRIVE_EFX) do play_efx(p, ids, sc.door.center, sc.rot, 1.0) end
             play_sound(p, ARRIVE_SOUND)
             sc.phase, sc.t0 = "walk", now
@@ -878,15 +944,15 @@ local function step_through(p)
     local was = s.side
     s.side = side
     if was and was < 0 and side >= 0 and across <= DOOR_WIDTH / 2 + 0.3 and math.abs(pos.y - s.center.y) < (s.airDoor and 4.0 or 2.0) then
-        local dest, rot, dist, air = s.dest, s.rot, s.dist, s.air
+        local dest, rot, dist, air, groundY = s.dest, s.rot, s.dist, s.air, s.groundY
         local fx, fz = forward_of(rot)
         finish_door(s)
         state, s = nil, nil
         if config.cutscene then
-            start_scene(p, dest, dist, fx, fz, air)
+            start_scene(p, dest, dist, fx, fz, air, groundY)
             return
         end
-        teleport(p, dest, rot)
+        teleport(p, dest, rot, groundY)
         for _, ids in ipairs(ARRIVE_EFX) do play_efx(p, ids, dest, rot, 1.0) end
         play_sound(p, ARRIVE_SOUND)
         event(string.format("stepped through: %.0f ft", dist / FT))
@@ -927,7 +993,8 @@ re.on_pre_application_entry("UpdateBehavior", function()
             if pressed then cancel("door closed"); return end
             if os.clock() > s.untilT then cancel("door faded"); return end
             draw_door(p, s)
-            step_through(p)
+            draw_door(p, s.remote)
+            if s then step_through(p) end
         end
     end)
     if not ok then event("error: " .. tostring(err)); state, s = nil, nil; end_scene("error") end
@@ -939,7 +1006,7 @@ re.on_script_reset(function()
     aimLock = false
     finish_door(s)
     if scene then finish_door(scene.door) end
-    pendingPlace = nil
+    pendingPlace, fallGuard, fallReset = nil, nil, nil
     end_scene("script reset")
     for _, e in ipairs(liveEfx) do pcall(finish_effect, e.container) end
 end)
