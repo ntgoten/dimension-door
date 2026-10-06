@@ -1,4 +1,4 @@
--- Dimension Door (D&D style) - Dragon's Dogma 2 (REFramework script) v0.8.4
+-- Dimension Door (D&D style) - Dragon's Dogma 2 (REFramework script) v0.8.5
 -- Press B (keyboard) or hold Vocation Action + give Go! (gamepad default: R1 + d-pad up): your character starts
 -- casting (Mage casting animation) and a beam goes from your eyes to where the camera aims, up to 500 ft; it
 -- stops at the first thing it hits (or ends in the air). Sparks mark the spot. Press again: the spot is locked and a door of frost shimmer opens next
@@ -10,7 +10,7 @@
 -- Needs _ScriptCore (autorun/_SharedCore) for the ground checks.
 -- REFramework menu (Insert) > Script Generated UI > Dimension Door. Uninstall: delete this file.
 
-local VERSION = "0.8.4"
+local VERSION = "0.8.5"
 local CONFIG_FILE = "DimensionDoor.json"
 local LOG_FILE = "DimensionDoor_debug.json"
 local FT = 0.3048
@@ -753,10 +753,27 @@ end
 -- the transform is undone by the character's position history), done during the game's input processing and
 -- held for 8 frames. Afterwards the cameras are told about the warp (they don't follow long jumps otherwise).
 ------------------------------------------------------------------------
+-- someone carried by the player (CatchController.CaughtChara) rides along, but keeps their own safe-position history
+-- (PosRotRecorder): on being put down the game warps them back to it (= the pre-door spot). Warp them too, with the
+-- same reset option, so their history starts at the arrival.
+local carriedLogged
+local function place_carried(chara, dest, rot, opt)
+    local ok, e = pcall(function()
+        local cc = chara:call("get_CatchController")
+        local caught = cc and cc:get_field("CaughtChara")
+        if not caught then return end
+        caught:call("warp(via.vec3, via.Quaternion, app.CharacterWarpOption)", dest, rot, opt)
+        pcall(function() caught:call("get_PosRotRecorder"):call("resetHistory()") end)
+        if carriedLogged ~= caught then carriedLogged = caught; event("carried character brought along (position history reset)") end
+    end)
+    if not ok and carriedLogged ~= "err" then carriedLogged = "err"; event("carried character: " .. tostring(e)) end
+end
+
 local function place(chara, dest, rot)
     local ok = pcall(function()
         local opt = sdk.find_type_definition("app.CharacterWarpOption"):get_field("ResetPosRotContext"):get_data(nil)
         chara:call("warp(via.vec3, via.Quaternion, app.CharacterWarpOption)", dest, rot, opt)
+        place_carried(chara, dest, rot, opt)
     end)
     if ok then return end
     local tr = transform_of(chara)

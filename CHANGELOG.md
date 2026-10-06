@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.5
+- Someone you carry through the door now stays at the destination when you put them down (they used to jump
+  back to where they were before the door).
+
 ## 0.8.4
 - Simpler settings menu: only the key, max range, how long the door stays open, and the door look. Everything
   else uses the tuned defaults.
