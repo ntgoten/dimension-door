@@ -1,7 +1,7 @@
--- Dimension Door (D&D style) - Dragon's Dogma 2 (REFramework script) v0.8.5
+-- Dimension Door (D&D style) - Dragon's Dogma 2 (REFramework script) v0.8.6
 -- Press B (keyboard) or hold Vocation Action + give Go! (gamepad default: R1 + d-pad up): your character starts
 -- casting (Mage casting animation) and a beam goes from your eyes to where the camera aims, up to 500 ft; it
--- stops at the first thing it hits (or ends in the air). Sparks mark the spot. Press again: the spot is locked and a door of frost shimmer opens next
+-- stops at the first thing it hits (or ends in the air). A tall pillar of frost light marks the spot (the camera moves over your shoulder while aiming). Press again: the spot is locked and a door of frost shimmer opens next
 -- to you. Walk through it: the camera flies to the destination, a door opens there, your character steps out of
 -- it facing the camera, and the camera swings back behind you. Press once more to close an open door.
 -- Effects/sounds borrowed from Mystic Spearhand's Skydragon's Fangtooth; the door is a Frost Boon shimmer frame with
@@ -10,7 +10,8 @@
 -- Needs _ScriptCore (autorun/_SharedCore) for the ground checks.
 -- REFramework menu (Insert) > Script Generated UI > Dimension Door. Uninstall: delete this file.
 
-local VERSION = "0.8.5"
+local M = {}
+local VERSION = "0.8.6"
 local CONFIG_FILE = "DimensionDoor.json"
 local LOG_FILE = "DimensionDoor_debug.json"
 local FT = 0.3048
@@ -33,6 +34,11 @@ local DEFAULTS = {
     wisp_w = 1.22,          -- wisps stretched sideways
     wisp_h = 1.10,          -- wisps stretched upward
     door_style = 1,         -- 1 = shimmer frame + wisps + glow, 2 = classic (shimmer frame only, v0.8.2)
+    aim_cam = true,         -- (0.8.6) camera up / over the shoulder while aiming
+    aim_up = 0.8, aim_right = 0.6, aim_back = 0.0,
+    pillar = true,          -- (0.8.6) the target pillar
+    pillar_h = 7.0, pillar_step = 0.45, pillar_ring = 3, pillar_r = 0.2,
+    sparks = true,          -- the old target sparks too
 }
 
 -- fixed settings
@@ -55,7 +61,7 @@ local function copy(v)
     return t
 end
 local config = json.load_file(CONFIG_FILE) or {}
-local USER_SETTINGS = { key = true, max_ft = true, door_time = true, door_style = true }   -- the menu's settings
+local USER_SETTINGS = { key = true, max_ft = true, door_time = true, door_style = true, aim_cam = true, pillar = true }   -- the menu's settings
 for k, v in pairs(DEFAULTS) do
     if config[k] == nil or not USER_SETTINGS[k] then config[k] = copy(v) end    -- the rest: always the defaults
 end
@@ -279,6 +285,52 @@ local function make_anchor(name, pos, rot)
     return go
 end
 
+------------------------------------------------------------------------
+-- (0.8.6) the target pillar: the door's frost shimmer stacked into a tall column (rings of a few pieces every
+-- pillar_step metres), moved with the aim. No light (the old target light cost performance and blinded up close).
+------------------------------------------------------------------------
+local pillar -- { items = { { go, off } }, cur, key }
+local function pillar_off()
+    if not pillar then return end
+    for _, it in ipairs(pillar.items) do pcall(function() it.go:call("destroy(via.GameObject)", it.go) end) end
+    pillar = nil
+end
+local function pillar_key()
+    return ("%.2f/%.2f/%d/%.2f"):format(config.pillar_h, config.pillar_step, math.floor(config.pillar_ring), config.pillar_r)
+end
+local function pillar_at(base, dt)
+    if not config.pillar then pillar_off(); return end
+    local key = pillar_key()
+    if pillar and pillar.key ~= key then pillar_off() end
+    if not pillar then
+        pillar = { items = {}, cur = base, key = key }
+        local n = math.max(1, math.floor(config.pillar_h / math.max(0.1, config.pillar_step) + 0.5))
+        local ring = math.max(1, math.floor(config.pillar_ring))
+        for i = 0, n - 1 do
+            for j = 0, ring - 1 do
+                local ang = (j + (i % 2) * 0.5) / ring * 2 * math.pi
+                local off = { math.cos(ang) * config.pillar_r, i * config.pillar_step, math.sin(ang) * config.pillar_r }
+                local ok, go = pcall(make_anchor, "DimensionDoor_pillar", Vector3f.new(base.x + off[1], base.y + off[2], base.z + off[3]))
+                if ok and go then
+                    pillar.items[#pillar.items + 1] = { go = go, off = off }
+                    pcall(efx_player, go, SHIMMER_EFX)
+                end
+            end
+        end
+    end
+    local c = pillar.cur
+    local dx, dy, dz = base.x - c.x, base.y - c.y, base.z - c.z
+    if dx * dx + dy * dy + dz * dz > 15 * 15 then c = base   -- a big jump: straight there
+    else
+        local k = math.min(1, dt * 14)
+        c = Vector3f.new(c.x + dx * k, c.y + dy * k, c.z + dz * k)
+    end
+    pillar.cur = c
+    for _, it in ipairs(pillar.items) do
+        pcall(function() it.go:get_Transform():set_Position(Vector3f.new(c.x + it.off[1], c.y + it.off[2], c.z + it.off[3])) end)
+    end
+end
+
 local function finish_door(d)
     if not d then return end
     if d.remote then finish_door(d.remote) end
@@ -400,6 +452,7 @@ local state, s = nil, nil
 local cast_cancel, open_door -- defined further down
 
 local function cancel(why)
+    pillar_off()
     if cast_cancel then cast_cancel() end
     finish_door(s)
     state, s = nil, nil
@@ -622,7 +675,14 @@ local function aim_update(p)
         local ok, b = pcall(beam_now, p)
         if ok and b then s.b = b elseif not ok then event("beam error: " .. tostring(b)) end
     end
-    if s.b and now >= s.nextFx then
+    if s.b then   -- (0.8.6) the pillar, every frame
+        local b, back = s.b, s.b.hit and 0.5 or 0
+        local base = Vector3f.new(b.endp.x - b.dx * back, b.endp.y - b.dy * back - 0.3, b.endp.z - b.dz * back)
+        local dt = math.min(0.1, now - (s.lastPillarT or now))
+        s.lastPillarT = now
+        pcall(pillar_at, base, dt)
+    end
+    if s.b and config.sparks and now >= s.nextFx then
         s.nextFx = now + 0.3
         local b, back = s.b, s.b.hit and 0.5 or 0 -- a little in front of what the beam hit
         local sp = Vector3f.new(b.endp.x - b.dx * back, b.endp.y - b.dy * back, b.endp.z - b.dz * back)
@@ -632,6 +692,7 @@ local function aim_update(p)
 end
 
 local function lock_beam(p)
+    pillar_off()
     local b = s.b
     if not b then cancel("no target yet - spell fizzled"); return end
     local dest, air, groundY = landing(b)
@@ -845,6 +906,7 @@ pcall(function()
     end, function(ret)
         if mainCam then
             pcall(function() gamePose = { pos = mainCam._Position, rot = mainCam._Rotation } end)
+            if not camOverride and gamePose then pcall(M.aim_camera, mainCam) end
             if camOverride then
                 pcall(function()
                     local j = mainCam._CameraJoint
@@ -856,6 +918,25 @@ pcall(function()
         return ret
     end)
 end)
+
+-- (0.8.6) aiming: the camera up and to the right (over the shoulder), so the target at the screen centre isn't
+-- behind the character's own body. Its rotation stays the game's; blended in 0.3 s, out 0.4 s.
+local aimK, aimLastT = 0, nil
+function M.aim_camera(mc)
+    local now = os.clock()
+    local dt = math.min(0.1, now - (aimLastT or now))
+    aimLastT = now
+    local want = (config.aim_cam and state == "aiming") and 1 or 0
+    if want > aimK then aimK = math.min(1, aimK + dt / 0.3) elseif want < aimK then aimK = math.max(0, aimK - dt / 0.4) end
+    if aimK <= 0 then return end
+    local k = ease(aimK)
+    local q, pp = gamePose.rot, gamePose.pos
+    local rx, rz = flat_dir(1 - 2 * (q.y * q.y + q.z * q.z), 2 * (q.x * q.z - q.w * q.y))   -- camera right, level
+    local bx, by, bz = 2 * (q.x * q.z + q.w * q.y), 2 * (q.y * q.z - q.w * q.x), 1 - 2 * (q.x * q.x + q.y * q.y)   -- camera back
+    rx, rz = rx or 0, rz or 0
+    local r, u, bk = config.aim_right * k, config.aim_up * k, config.aim_back * k
+    mc._CameraJoint:set_Position(Vector3f.new(pp.x + rx * r + bx * bk, pp.y + u + by * bk, pp.z + rz * r + bz * bk))
+end
 
 -- walk-out: left-stick values for a world direction, relative to the game's own camera
 local function stick_for(dx, dz, strength)
@@ -1154,6 +1235,7 @@ re.on_pre_application_entry("UpdateBehavior", function()
 end)
 
 re.on_script_reset(function()
+    pillar_off()
     pcall(function() local p = player(); if p then cast_end(p) end end)
     pause_fsm(nil, false)
     aimLock = false
@@ -1186,6 +1268,8 @@ re.on_draw_ui(function()
     c, config.max_ft = imgui.slider_int("Max range (ft)", config.max_ft, 30, 1000); changed = changed or c
     c, config.door_time = imgui.slider_int("Door stays open (s)", config.door_time, 5, 300); changed = changed or c
     c, config.door_style = imgui.combo("Door look", config.door_style, { "Shimmer frame + wisps + glow", "Classic (shimmer frame only)" }); changed = changed or c
+    c, config.pillar = imgui.checkbox("Target pillar", config.pillar); changed = changed or c
+    c, config.aim_cam = imgui.checkbox("Camera over the shoulder while aiming", config.aim_cam); changed = changed or c
     local st = "ready"
     if state == "aiming" then st = s.b and string.format("aiming, %.0f ft%s", s.b.dist / FT, s.b.hit and "" or " (open air)") or "aiming"
     elseif state == "door" then st = string.format("door open, %.0f ft, %ds left", s.dist / FT, math.floor(s.untilT - os.clock())) end

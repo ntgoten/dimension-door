@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.6
+- New target marker: a tall pillar of frost light (the door's frost shimmer) stands where you'll arrive and follows
+  your aim, so the spot is easy to see near and far. The sparks are still there. No light source, so no extra cost.
+- While aiming, the camera moves up over your shoulder, so your own character no longer hides the target.
+- Both can be turned off in the menu (**Target pillar**, **Camera over the shoulder while aiming**).
+
 ## 0.8.5
 - Someone you carry through the door now stays at the destination when you put them down (they used to jump
   back to where they were before the door).

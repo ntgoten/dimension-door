@@ -7,8 +7,9 @@ at the destination.
 - **Cast:** press **B** (keyboard), or **hold your Vocation Action button and give Go!** (gamepad; with the default
   controls that's **R1 + d-pad up**). The mod follows the game's own button mapping. Your character goes into the Mage's
   spell-casting animation and turns to where you aim. A beam goes from your eyes to where the camera
-  points and stops at the first thing it hits (ground, a wall, a roof); sparks mark the spot. If it hits
-  nothing it ends in the air 500 ft away.
+  points and stops at the first thing it hits (ground, a wall, a roof); a tall pillar of frost light and sparks mark
+  the spot. While you aim, the camera moves up over your shoulder so your character doesn't hide the target. If it
+  hits nothing it ends in the air 500 ft away.
 - **Open the door:** press again (on gamepad, d-pad up alone works while aiming). The target is locked and a door opens right next to you: a frost-shimmer frame
   with frost wisps and a soft light inside (or the classic shimmer-only frame), toward the camera, even in the air at a roof edge. A matching door appears at the destination too (just
   for show).
@@ -20,10 +21,10 @@ at the destination.
 - Free: no cost, no cooldown.
 
 Everything you see is the game's own: Mystic Spearhand's Skydragon's Fangtooth sparks and sounds, the Frost
-Boon shimmer and wisps, a cutscene light glow, the ferrystone warp sound and the Mage's casting animation. No frost
+Boon shimmer (door and target pillar) and wisps, a cutscene light glow, the ferrystone warp sound and the Mage's casting animation. No frost
 weapon is needed (the wisps come from a hidden Stalwart Sword the mod spawns from the game's weapon catalog). No game files are included or replaced.
 
-Current version: **0.8.5**. Download it from [Releases](../../releases).
+Current version: **0.8.6**. Download it from [Releases](../../releases).
 
 ## Requirements
 
@@ -42,11 +43,12 @@ Current version: **0.8.5**. Download it from [Releases](../../releases).
 
 ## Settings
 
-Press **Insert** → *Script Generated UI* → **Dimension Door v0.8.5**:
+Press **Insert** → *Script Generated UI* → **Dimension Door v0.8.6**:
 
 - **Key** (click to change; letters and F-keys)
 - **Max range (ft)**, **Door stays open (s)**
 - **Door look**: shimmer frame + wisps + glow, or classic (shimmer frame only)
+- **Target pillar** on/off, **Camera over the shoulder while aiming** on/off
 
 Settings are saved to `reframework/data/DimensionDoor.json`.
 
