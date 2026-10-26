@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.8.7
+- Getting hit while aiming no longer leaves your character stuck in the casting pose: the spell is cancelled and
+  the hit reaction plays. Before, the stuck pose could even survive loading a save (only a script reset helped).
+- Loading a save while aiming also resets the spell.
+
 ## 0.8.6
 - New target marker: a tall pillar of frost light (the door's frost shimmer) stands where you'll arrive and follows
   your aim, so the spot is easy to see near and far. The sparks are still there. No light source, so no extra cost.

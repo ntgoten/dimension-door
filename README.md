@@ -24,7 +24,7 @@ Everything you see is the game's own: Mystic Spearhand's Skydragon's Fangtooth s
 Boon shimmer (door and target pillar) and wisps, a cutscene light glow, the ferrystone warp sound and the Mage's casting animation. No frost
 weapon is needed (the wisps come from a hidden Stalwart Sword the mod spawns from the game's weapon catalog). No game files are included or replaced.
 
-Current version: **0.8.6**. Download it from [Releases](../../releases).
+Current version: **0.8.7**. Download it from [Releases](../../releases).
 
 ## Requirements
 
@@ -43,7 +43,7 @@ Current version: **0.8.6**. Download it from [Releases](../../releases).
 
 ## Settings
 
-Press **Insert** → *Script Generated UI* → **Dimension Door v0.8.6**:
+Press **Insert** → *Script Generated UI* → **Dimension Door v0.8.7**:
 
 - **Key** (click to change; letters and F-keys)
 - **Max range (ft)**, **Door stays open (s)**
